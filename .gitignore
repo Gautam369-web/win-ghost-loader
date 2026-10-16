@@ -1,4 +1,4 @@
-# Binaries & Object Files
+# Compiled binaries & object files
 *.exe
 *.dll
 *.o
@@ -6,4 +6,18 @@
 
 # Build artifacts & logs
 *.log
-*.txt
+build_errors.txt
+compile_err.txt
+compile_err2.txt
+compile_stderr.txt
+compile_stdout.txt
+link_err.txt
+preproc_err.txt
+
+# Personal config (never commit user data)
+user_config.json
+
+# Editor / OS
+.DS_Store
+Thumbs.db
+*.pem

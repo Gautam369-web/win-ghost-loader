@@ -1239,6 +1239,59 @@ static std::wstring g_mcqOptions[5];    // parsed option texts A-E (protected by
 static int          g_mcqOptCount = 4;  // 4 or 5 options found
 static int          g_mcqScrollY  = 0;  // scroll offset for MCQ overlay (pixels)
 
+// ── ParseMCQOptions: extract option text for A-E from MCQ text ─────────────
+// Recognises: "A) text"  "A. text"  "(A) text"  "(A.) text"
+// Does NOT match "A:" to avoid false positives in code/prose
+static int ParseMCQOptions(const std::string& text){
+    for(int i=0;i<5;i++) g_mcqOptions[i].clear();
+    int found=0;
+    // split into lines
+    size_t pos=0;
+    while(pos<=text.size()){
+        size_t nl=text.find('\n',pos);
+        std::string ln=(nl==std::string::npos)?text.substr(pos):text.substr(pos,nl-pos);
+        pos=(nl==std::string::npos)?text.size()+1:nl+1;
+        // strip \r and leading spaces
+        if(!ln.empty()&&ln.back()=='\r') ln.pop_back();
+        size_t s=0; while(s<ln.size()&&(ln[s]==' '||ln[s]=='\t')) s++;
+        if(ln.size()-s<3) continue;
+        ln=ln.substr(s);
+        int idx=-1;
+        std::string optText;
+        char ch0=ln[0], ch1=ln.size()>1?ln[1]:0;
+        // Pattern 1: "A) text"  or "A. text"
+        if(ch0>='A'&&ch0<='E'&&(ch1==')' ||ch1=='.')&&ln.size()>2){
+            idx=ch0-'A';
+            optText=ln.substr(2);
+        }
+        // Pattern 2: "(A) text"
+        else if(ch0=='('&&ln.size()>3&&ln[1]>='A'&&ln[1]<='E'&&ln[2]==')'){
+            idx=ln[1]-'A';
+            optText=ln.substr(3);
+        }
+        // Pattern 3: "(A.) text"
+        else if(ch0=='('&&ln.size()>4&&ln[1]>='A'&&ln[1]<='E'&&ln[2]=='.'&&ln[3]==')'){
+            idx=ln[1]-'A';
+            optText=ln.substr(4);
+        }
+        if(idx<0||idx>4) continue;
+        // trim leading space from option text
+        size_t ts=0; while(ts<optText.size()&&optText[ts]==' ') ts++;
+        optText=optText.substr(ts);
+        // Reject lines that look like code (contain { } ; = ->)
+        bool looksLikeCode=false;
+        if(optText.find("->")!=std::string::npos||optText.find("{")!=std::string::npos
+           ||optText.find("};")!=std::string::npos||optText.find("std::")!=std::string::npos)
+            looksLikeCode=true;
+        if(looksLikeCode) continue;
+        if(!optText.empty()&&(int)g_mcqOptions[idx].empty()){
+            g_mcqOptions[idx]=FromUtf8(optText);
+            if(idx+1>found) found=idx+1;
+        }
+    }
+    return (found<4)?4:(found>5?5:found);
+}
+
 static DWORD WINAPI MCQExtractThread(LPVOID){
     if(RequestCancelled())return 0;
     t_mcqRequest=true;
@@ -1266,12 +1319,26 @@ static DWORD WINAPI MCQExtractThread(LPVOID){
         return 0;
     }
 
-    // Store snippet for overlay (from cleaned question)
-    { std::string snippet=question.substr(0,std::min((size_t)80,question.size()));
+    // Store snippet for overlay — skip junk header lines (app title etc)
+    { std::string snipSrc=question;
+      // Skip lines that look like labels/headers (no ? and shorter than 10 chars)
+      size_t skipTo=0;
+      for(size_t si=0;si<snipSrc.size();){
+          size_t nl=snipSrc.find('\n',si);
+          std::string firstLine=(nl==std::string::npos)?snipSrc.substr(si):snipSrc.substr(si,nl-si);
+          // Use this line as snippet start if it has substance (>=15 chars)
+          if(firstLine.size()>=15){ skipTo=si; break; }
+          si=(nl==std::string::npos)?snipSrc.size():nl+1;
+      }
+      std::string snippet=snipSrc.substr(skipTo, std::min((size_t)90, snipSrc.size()-skipTo));
       for(char& c:snippet) if(c=='\n'||c=='\r'||c=='\t') c=' ';
       StateLock lk(g_stateMutex);
       g_mcqQuestion=FromUtf8(snippet);
     }
+    // ── Parse option lines from cleaned text ─────────────────────────
+    { StateLock lk(g_stateMutex);
+      g_mcqOptCount = ParseMCQOptions(question);
+      g_mcqScrollY  = 0; }
     SetLog(("MCQ: "+std::to_string(t_extractedBytes)+" bytes raw"
            +(wasTrimmed?" \u2192 trimmed to "+std::to_string(question.size())+" chars":"")+". Analyzing...").c_str());
 
@@ -1283,7 +1350,7 @@ static DWORD WINAPI MCQExtractThread(LPVOID){
         "You are solving a multiple-choice question (MCQ). "
         "Read the question and all options carefully, then identify the correct answer. "
         "If the question or its options are missing or ambiguous, reply exactly: UNKNOWN\n"
-        "Otherwise reply ONLY a single uppercase letter: A, B, C, or D -- nothing else.\n\n"
+        "Otherwise reply ONLY a single uppercase letter: A, B, C, D, or E -- nothing else.\n\n"
         "Question and options:\n"+question;
     std::string answer=CallGemini(prompt);
 
@@ -1300,9 +1367,9 @@ static DWORD WINAPI MCQExtractThread(LPVOID){
 
     // ── Step 3: Prepare result and show overlay ─────────────────────────
     // Z-pattern corners: A=top-left B=top-right C=bottom-left D=bottom-right
-    static const wchar_t* CORNERS[]={L"TOP-LEFT",L"TOP-RIGHT",L"BOTTOM-LEFT",L"BOTTOM-RIGHT"};
+    static const wchar_t* CORNERS[]={L"TOP-LEFT",L"TOP-RIGHT",L"BOTTOM-LEFT",L"BOTTOM-RIGHT",L"CENTER"};
     int ci = letter-'A';
-    std::wstring cornerW = (ci>=0&&ci<4) ? CORNERS[ci] : L"UNKNOWN";
+    std::wstring cornerW = (ci>=0&&ci<5) ? CORNERS[ci] : L"UNKNOWN";
 
     { StateLock lk(g_stateMutex);
       g_mcqLetter = letter;

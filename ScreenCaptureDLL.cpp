@@ -1191,15 +1191,15 @@ static void MoveMouseHuman(int tx, int ty){
 
 // Z-pattern corners: A=top-left  B=top-right  C=bot-left  D=bot-right
 static void MoveMCQMouse(char letter){
-    if(letter < 'A' || letter > 'D') return;
-    int idx = letter - 'A';
-    int scrW = GetSystemMetrics(SM_CXSCREEN), scrH = GetSystemMetrics(SM_CYSCREEN);
+    if(letter<'A'||letter>'E') return;
+    int scrW=GetSystemMetrics(SM_CXSCREEN), scrH=GetSystemMetrics(SM_CYSCREEN);
     int cx, cy;
-    switch(idx){
-        case 0: cx = 80;        cy = 80;        break; // A: top-left
-        case 1: cx = scrW - 80; cy = 80;        break; // B: top-right
-        case 2: cx = 80;        cy = scrH - 80; break; // C: bottom-left
-        default:cx = scrW - 80; cy = scrH - 80; break; // D: bottom-right
+    switch(letter){
+        case 'A': cx=80;        cy=80;        break; // top-left
+        case 'B': cx=scrW-80;   cy=80;        break; // top-right
+        case 'C': cx=80;        cy=scrH-80;   break; // bottom-left
+        case 'D': cx=scrW-80;   cy=scrH-80;   break; // bottom-right
+        default:  cx=scrW/2;    cy=scrH/2;    break; // E: center screen
     }
     MoveMouseHuman(cx, cy);
 }
@@ -1235,6 +1235,10 @@ static std::string CleanMCQText(const std::string& raw){
     return out;
 }
 
+static std::wstring g_mcqOptions[5];    // parsed option texts A-E (protected by g_stateMutex)
+static int          g_mcqOptCount = 4;  // 4 or 5 options found
+static int          g_mcqScrollY  = 0;  // scroll offset for MCQ overlay (pixels)
+
 static DWORD WINAPI MCQExtractThread(LPVOID){
     if(RequestCancelled())return 0;
     t_mcqRequest=true;
@@ -1242,7 +1246,9 @@ static DWORD WINAPI MCQExtractThread(LPVOID){
 
     // Clear any previous MCQ result globals before starting
     { StateLock lk(g_stateMutex);
-      g_mcqLetter=0; g_mcqQuestion.clear(); g_mcqCorner.clear(); }
+      g_mcqLetter=0; g_mcqQuestion.clear(); g_mcqCorner.clear();
+      for(int _i=0;_i<5;_i++) g_mcqOptions[_i].clear();
+      g_mcqOptCount=4; g_mcqScrollY=0; }
 
     // ── Step 1: Reading question text ─────────────────────────────
     SetLog("MCQ: Reading question text from screen...");
@@ -1349,7 +1355,7 @@ static void SetProcessing(int step, bool s1done, bool s2done){
 }
 
 #define OVL_W  330
-#define OVL_H  205
+#define OVL_H  240
 
 // Called from TextExtractThread when AI answer is ready
 static void SetAnswer(const std::wstring& answer,bool typeable){
@@ -1363,7 +1369,7 @@ static void SetAnswer(const std::wstring& answer,bool typeable){
     g_histIdx = (int)g_answerHistory.size()-1;
     g_answerDisplay = answer;
     g_displaySubject=t_subject;
-    if(typeable) g_mcqLetter=0;  // clear MCQ result when loading typeable answer
+    if(typeable){g_mcqLetter=0;for(int _i=0;_i<5;_i++) g_mcqOptions[_i].clear();g_mcqOptCount=4;g_mcqScrollY=0;}  // clear MCQ state
     LoadIntoBuffer(typeable?answer:std::wstring{});
     g_overlayMode   = 1;
     }
@@ -1386,6 +1392,9 @@ struct OverlaySnapshot {
     char         mcqLetter;       // 0 or 'A'-'D'
     std::wstring mcqQuestion;     // truncated question snippet
     std::wstring mcqCorner;       // e.g. L"TOP-LEFT"
+    std::wstring mcqOptions[5]; // option texts A-E
+    int          mcqOptCount;   // 4 or 5
+    int          mcqScrollY;    // scroll offset
 };
 static OverlaySnapshot SnapshotOverlay(){
     StateLock lock(g_stateMutex);
@@ -1406,6 +1415,9 @@ static OverlaySnapshot SnapshotOverlay(){
     s.mcqLetter   = g_mcqLetter;
     s.mcqQuestion = g_mcqQuestion;
     s.mcqCorner   = g_mcqCorner;
+    for(int _i=0;_i<5;_i++) s.mcqOptions[_i]=g_mcqOptions[_i];
+    s.mcqOptCount = g_mcqOptCount;
+    s.mcqScrollY  = g_mcqScrollY;
     return s;
 }
 
@@ -1584,84 +1596,155 @@ static void DrawShortcuts(HDC hdc, const RECT& rc,const OverlaySnapshot& view){
 
 // ── Draw mode 1 (MCQ variant): Dedicated MCQ Result display ─────────────────
 static void DrawMCQResult(HDC hdc, const RECT& rc, const OverlaySnapshot& view){
-    auto hline=[&](int y, COLORREF c){
+    int N = view.mcqOptCount; if(N<4)N=4; if(N>5)N=5;
+    // Total scrollable content height estimate
+    int contentH = 26 + (view.mcqQuestion.empty()?0:21) + N*18 + 38 + 16;
+    int visH = (int)rc.bottom - 24;           // visible area below frozen header
+    int maxScroll = std::max(0, contentH - visH);
+    int scrollY = std::min(view.mcqScrollY, maxScroll);
+    int rightEdge = (maxScroll>0) ? rc.right-6 : rc.right-4;
+
+    // helper: horizontal line
+    auto hline=[&](int yy, COLORREF c){
+        if(yy<22||yy>rc.bottom) return;
         HPEN p=CreatePen(PS_SOLID,1,c);HPEN op=(HPEN)SelectObject(hdc,p);
-        MoveToEx(hdc,4,y,NULL);LineTo(hdc,rc.right-4,y);
+        MoveToEx(hdc,4,yy,NULL);LineTo(hdc,rightEdge,yy);
         SelectObject(hdc,op);DeleteObject(p);};
 
-    // ── Title ────────────────────────────────────────────────────────
-    HFONT fntB=CreateFontW(-13,0,0,0,FW_BOLD,0,0,0,DEFAULT_CHARSET,0,0,CLEARTYPE_QUALITY,FIXED_PITCH,L"Consolas");
-    HFONT of=(HFONT)SelectObject(hdc,fntB);
-    SetTextColor(hdc, RGB(255,210,60));
-    RECT tRc={6,4,rc.right-6,20};
-    DrawTextW(hdc,L"  \u2726 MCQ RESULT  |  F7=Hide",-1,&tRc,DT_LEFT|DT_SINGLELINE|DT_END_ELLIPSIS);
-    SelectObject(hdc,of); DeleteObject(fntB);
-    hline(22,RGB(80,65,15));
+    // ── Scrollbar ─────────────────────────────────────────────────────────
+    if(maxScroll>0){
+        RECT sbBg={rc.right-5,24,rc.right-1,rc.bottom-1};
+        HBRUSH sbBr=CreateSolidBrush(RGB(25,25,20)); FillRect(hdc,&sbBg,sbBr); DeleteObject(sbBr);
+        int sbH=(int)rc.bottom-25;
+        int thumbH=std::max(14,(int)(sbH*((int)rc.bottom-24)/std::max(1,contentH)));
+        int thumbY=24+(int)((sbH-thumbH)*scrollY/std::max(1,maxScroll));
+        RECT sbThumb={rc.right-5,thumbY,rc.right-1,thumbY+thumbH};
+        HBRUSH th=CreateSolidBrush(RGB(130,110,40)); FillRect(hdc,&sbThumb,th); DeleteObject(th);
+    }
+
+    // ── Frozen header (not scrolled) ──────────────────────────────────────
+    {
+        HFONT fntB=CreateFontW(-12,0,0,0,FW_BOLD,0,0,0,DEFAULT_CHARSET,0,0,CLEARTYPE_QUALITY,FIXED_PITCH,L"Consolas");
+        HFONT of=(HFONT)SelectObject(hdc,fntB);
+        // Re-fill header background to cover any scroll bleed
+        HBRUSH hdrBg=CreateSolidBrush(RGB(11,13,18));
+        RECT hdrR={0,0,rc.right,23}; FillRect(hdc,&hdrR,hdrBg); DeleteObject(hdrBg);
+        SetTextColor(hdc,RGB(255,210,60));
+        wchar_t ttl[64]={};
+        swprintf_s(ttl,64,L"  \u2726 MCQ RESULT (%d opts)  F7=Hide",N);
+        RECT tRc={4,4,rightEdge,20};
+        DrawTextW(hdc,ttl,-1,&tRc,DT_LEFT|DT_SINGLELINE|DT_END_ELLIPSIS);
+        SelectObject(hdc,of); DeleteObject(fntB);
+        HPEN sep=CreatePen(PS_SOLID,1,RGB(80,65,15));
+        HPEN osep=(HPEN)SelectObject(hdc,sep);
+        MoveToEx(hdc,4,22,NULL);LineTo(hdc,rightEdge,22);
+        SelectObject(hdc,osep);DeleteObject(sep);
+    }
 
     HFONT fnt=CreateFontW(-12,0,0,0,FW_NORMAL,0,0,0,DEFAULT_CHARSET,0,0,CLEARTYPE_QUALITY,FIXED_PITCH,L"Consolas");
     HFONT ofc=(HFONT)SelectObject(hdc,fnt);
 
-    int y=28;
+    // Clip drawing below frozen header
+    HRGN clip=CreateRectRgn(0,23,rc.right,(int)rc.bottom-14);
+    SelectClipRgn(hdc,clip);
 
-    // ── Question snippet ───────────────────────────────────────────────
+    int y = 26 - scrollY;
+
+    // ── Question snippet ─────────────────────────────────────────────────
     if(!view.mcqQuestion.empty()){
-        SetTextColor(hdc, RGB(155,155,115));
-        RECT qRc={6,y,rc.right-6,y+14};
-        std::wstring qLabel=L" Q: "+view.mcqQuestion;
-        DrawTextW(hdc,qLabel.c_str(),-1,&qRc,DT_LEFT|DT_SINGLELINE|DT_END_ELLIPSIS);
-        y+=16; hline(y,RGB(45,42,20)); y+=5;
+        if(y>=23&&y<rc.bottom-14){
+            SetTextColor(hdc,RGB(150,150,110));
+            RECT qRc={6,y,rightEdge,y+14};
+            std::wstring ql=L" Q: "+view.mcqQuestion;
+            DrawTextW(hdc,ql.c_str(),-1,&qRc,DT_LEFT|DT_SINGLELINE|DT_END_ELLIPSIS);
+        }
+        y+=16; hline(y,RGB(42,40,18)); y+=5;
     }
 
-    // ── Options A-D ──────────────────────────────────────────────────
+    // ── Options A-E ──────────────────────────────────────────────────────
     char correct=view.mcqLetter;
-    static const wchar_t* OPT_CORNERS[]={L"TOP-LEFT",L"TOP-RIGHT",L"BOT-LEFT",L"BOT-RIGHT"};
-    for(int i=0;i<4;i++){
+    static const wchar_t* OPT_CORNERS[]=
+        {L"TOP-LEFT",L"TOP-RIGHT",L"BOT-LEFT",L"BOT-RIGHT",L"CENTER"};
+
+    for(int i=0;i<N;i++){
         char thisOpt=(char)('A'+i);
         bool isCorrect=(thisOpt==correct);
-        if(isCorrect){
-            RECT hiRc={4,y-1,rc.right-4,y+15};
-            HBRUSH hiBr=CreateSolidBrush(RGB(8,45,12));
-            FillRect(hdc,&hiRc,hiBr); DeleteObject(hiBr);
+
+        if(y<rc.bottom-14 && y+18>23){
+            // Green highlight row for correct
+            if(isCorrect){
+                RECT hiRc={4,std::max(23,y-1),rightEdge,std::min((int)rc.bottom-14,y+17)};
+                HBRUSH hiBr=CreateSolidBrush(RGB(5,55,10));
+                FillRect(hdc,&hiRc,hiBr); DeleteObject(hiBr);
+            }
+
+            int rowY=y;
+            if(rowY>=23){
+                // Bullet
+                SetTextColor(hdc, isCorrect?RGB(0,240,80):RGB(48,48,68));
+                RECT bRc={5,rowY,18,rowY+14};
+                DrawTextW(hdc,isCorrect?L"\u25CF":L"\u25CB",-1,&bRc,DT_CENTER|DT_SINGLELINE);
+
+                // Option letter  "A:"
+                SetTextColor(hdc, isCorrect?RGB(60,255,100):RGB(80,80,100));
+                RECT lRc={18,rowY,33,rowY+14};
+                wchar_t lb[4]={}; swprintf_s(lb,4,L"%c:",thisOpt);
+                DrawTextW(hdc,lb,-1,&lRc,DT_LEFT|DT_SINGLELINE);
+
+                const std::wstring& optTxt=view.mcqOptions[i];
+
+                if(isCorrect){
+                    // Corner badge  "[TOP-LEFT]"  on right
+                    SetTextColor(hdc,RGB(255,220,50));
+                    wchar_t cb[22]={}; swprintf_s(cb,22,L"[%s]",OPT_CORNERS[i]);
+                    RECT cRc={rightEdge-98,rowY,rightEdge,rowY+14};
+                    DrawTextW(hdc,cb,-1,&cRc,DT_RIGHT|DT_SINGLELINE);
+                    // Option text in bright green
+                    SetTextColor(hdc,RGB(0,240,80));
+                    RECT tRc2={33,rowY,rightEdge-102,rowY+14};
+                    std::wstring lbl=optTxt.empty()?L"\u2190 CORRECT ANSWER":optTxt;
+                    DrawTextW(hdc,lbl.c_str(),-1,&tRc2,DT_LEFT|DT_SINGLELINE|DT_END_ELLIPSIS);
+                } else {
+                    SetTextColor(hdc,RGB(75,75,92));
+                    RECT tRc2={33,rowY,rightEdge,rowY+14};
+                    std::wstring lbl=optTxt.empty()?L"\u2014":optTxt;
+                    DrawTextW(hdc,lbl.c_str(),-1,&tRc2,DT_LEFT|DT_SINGLELINE|DT_END_ELLIPSIS);
+                }
+            }
         }
-        // bullet
-        SetTextColor(hdc, isCorrect?RGB(0,230,80):RGB(55,55,75));
-        RECT bRc={6,y,20,y+14}; DrawTextW(hdc,isCorrect?L"\u25CF":L"\u25CB",-1,&bRc,DT_CENTER|DT_SINGLELINE);
-        // option letter
-        SetTextColor(hdc, isCorrect?RGB(60,255,100):RGB(70,70,90));
-        RECT lRc={20,y,36,y+14};
-        wchar_t lbuf[4]={}; swprintf_s(lbuf,4,L"%c:",thisOpt);
-        DrawTextW(hdc,lbuf,-1,&lRc,DT_LEFT|DT_SINGLELINE);
-        if(isCorrect){
-            // corner badge on right
-            SetTextColor(hdc,RGB(255,220,50));
-            wchar_t cbuf[20]={}; swprintf_s(cbuf,20,L"[%s]",OPT_CORNERS[i]);
-            RECT cRc={rc.right-100,y,rc.right-4,y+14}; DrawTextW(hdc,cbuf,-1,&cRc,DT_RIGHT|DT_SINGLELINE);
-            // correct label
-            SetTextColor(hdc,RGB(0,230,80));
-            RECT tRc2={36,y,rc.right-104,y+14};
-            DrawTextW(hdc,L"\u2190 CORRECT",-1,&tRc2,DT_LEFT|DT_SINGLELINE|DT_END_ELLIPSIS);
-        } else {
-            SetTextColor(hdc,RGB(45,45,60));
-            RECT tRc2={36,y,rc.right-6,y+14};
-            DrawTextW(hdc,L"\u2014",-1,&tRc2,DT_LEFT|DT_SINGLELINE);
-        }
-        y+=17;
+        y+=18;
     }
 
     hline(y+2,RGB(55,50,18)); y+=8;
 
-    // ── Corner destination row ───────────────────────────────────────
-    SetTextColor(hdc,RGB(255,200,50));
-    RECT mRc={6,y,rc.right-6,y+14};
-    std::wstring mouseMsg=L" \u2192 Mouse \u2192 "+view.mcqCorner+L" corner";
-    DrawTextW(hdc,mouseMsg.c_str(),-1,&mRc,DT_LEFT|DT_SINGLELINE|DT_END_ELLIPSIS);
+    // ── Mouse corner row ─────────────────────────────────────────────────
+    if(y>=23&&y<rc.bottom-14){
+        SetTextColor(hdc,RGB(255,200,50));
+        RECT mRc={6,y,rightEdge,y+14};
+        std::wstring mm=L" \u2192 Mouse \u2192 "+view.mcqCorner+L" corner";
+        DrawTextW(hdc,mm.c_str(),-1,&mRc,DT_LEFT|DT_SINGLELINE|DT_END_ELLIPSIS);
+    }
     y+=16;
 
-    // ── Log / status ──────────────────────────────────────────────
-    SetTextColor(hdc,RGB(70,70,55));
-    RECT sRc={6,y,rc.right-6,y+13};
-    DrawTextW(hdc,(L" "+AtoW(view.log.c_str())).c_str(),-1,&sRc,DT_LEFT|DT_SINGLELINE|DT_END_ELLIPSIS);
+    // Scroll hint
+    if(maxScroll>0&&y>=23&&y<rc.bottom-14){
+        SetTextColor(hdc,RGB(55,55,38));
+        RECT sh={6,y,rightEdge,y+13};
+        DrawTextW(hdc,L" \u2191\u2193 scroll",-1,&sh,DT_LEFT|DT_SINGLELINE);
+    }
 
+    // Remove clip
+    SelectClipRgn(hdc,NULL); DeleteObject(clip);
+
+    // ── Pinned footer: log line ───────────────────────────────────────────
+    {
+        HBRUSH foot=CreateSolidBrush(RGB(11,13,18));
+        RECT footBg={0,rc.bottom-14,rc.right,rc.bottom};
+        FillRect(hdc,&footBg,foot); DeleteObject(foot);
+        SetTextColor(hdc,RGB(50,50,38));
+        RECT sRc={5,rc.bottom-13,rightEdge,rc.bottom-1};
+        DrawTextW(hdc,(L" "+AtoW(view.log.c_str())).c_str(),-1,&sRc,DT_LEFT|DT_SINGLELINE|DT_END_ELLIPSIS);
+    }
     SelectObject(hdc,ofc); DeleteObject(fnt);
 }
 
@@ -1804,6 +1887,12 @@ static LRESULT CALLBACK OvlWndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp){
         InvalidateRect(hwnd,nullptr,FALSE);return 0;
     }
 
+    case WM_MOUSEWHEEL:{
+        int delta=GET_WHEEL_DELTA_WPARAM(wp);
+        { StateLock lock(g_stateMutex);
+          g_mcqScrollY=std::max(0,g_mcqScrollY-(delta/WHEEL_DELTA)*22); }
+        InvalidateRect(hwnd,nullptr,FALSE); return 0;
+    }
     case WM_LBUTTONDOWN: ReleaseCapture();SendMessageW(hwnd,WM_NCLBUTTONDOWN,HTCAPTION,0);return 0;
     case WM_DESTROY: PostQuitMessage(0); return 0;
     default: return DefWindowProcW(hwnd,msg,wp,lp);

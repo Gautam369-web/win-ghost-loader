@@ -763,7 +763,7 @@ static std::string GetPromptForSubject(int subjIdx, const std::string& text) {
                "- DO NOT add any comments, explanations, or markdown.\n"
                "- DO NOT wrap output in code fences.\n"
                "- START immediately with the Python code. No preamble or closing remarks.\n"
-               "- ZERO INDENTATION for top-level code: top-level lines must start at column 0, no leading spaces or tabs.";
+               "- Use correct Python indentation (4 spaces per level). The code must be syntactically valid and compile/run without errors.";
 
     case 2: // C
         return "You are a C programming expert.\n\n"
@@ -782,7 +782,7 @@ static std::string GetPromptForSubject(int subjIdx, const std::string& text) {
                "- DO NOT add any comments, explanations, or markdown.\n"
                "- DO NOT wrap output in code fences.\n"
                "- START immediately with the C code. No preamble or closing remarks.\n"
-               "- ZERO INDENTATION: every line must start at column 0, no leading spaces or tabs.";
+               "- Use correct C indentation (4 spaces per level). The code must compile with gcc without errors.";
 
     case 3: // C++
         return "You are a C++ programming expert.\n\n"
@@ -801,7 +801,7 @@ static std::string GetPromptForSubject(int subjIdx, const std::string& text) {
                "- DO NOT add any comments, explanations, or markdown.\n"
                "- DO NOT wrap output in code fences.\n"
                "- START immediately with the C++ code. No preamble or closing remarks.\n"
-               "- ZERO INDENTATION: every line must start at column 0, no leading spaces or tabs.";
+               "- Use correct C++ indentation (4 spaces per level). The code must compile with g++ without errors.";
 
     case 4: // DBMS
         return "You are a DBMS/SQL expert.\n\n"
@@ -810,7 +810,7 @@ static std::string GetPromptForSubject(int subjIdx, const std::string& text) {
                "- Output ONLY the correct SQL queries, relational algebra, or DBMS answers as requested by the problem.\n"
                "- DO NOT add any explanations, markdown, or code blocks.\n"
                "- START immediately with the SQL queries or answers. No preamble or comments.\n"
-               "- ZERO INDENTATION: every line must start at column 0, no leading spaces or tabs.";
+               "- Use standard SQL formatting. Each keyword and clause on its own line.";
 
     case 1: // JAVA
         return "You are a Java programming expert.\n\n"
@@ -822,13 +822,13 @@ static std::string GetPromptForSubject(int subjIdx, const std::string& text) {
                "- Output ONLY the missing Java code that goes between the given header and footer.\n"
                "- DO NOT repeat any import statements, class declarations, or method signatures already present.\n"
                "- DO NOT include main() if it already appears in the footer.\n"
-               "- ZERO INDENTATION: every line must start at column 0, no leading spaces or tabs.\n\n"
+               "- Use correct Java indentation (4 spaces per level).\n\n"
                "MODE B — \"Full Program\" (use this if the extracted text is a plain problem statement with NO existing Java code):\n"
                "- Output a complete, working Java program that solves the problem.\n"
                "- Include all necessary import statements at the top.\n"
                "- Include a proper public class with a main() method.\n"
                "- Use Scanner for input and System.out.println for output.\n"
-               "- ZERO INDENTATION: every line must start at column 0, no leading spaces or tabs.\n\n"
+               "- Use correct Java indentation (4 spaces per level).\n\n"
                "GLOBAL RULES (both modes):\n"
                "- DO NOT add any comments, explanations, or markdown.\n"
                "- DO NOT wrap output in code fences.\n"
@@ -879,7 +879,7 @@ static std::string GetPromptForSubject(int subjIdx, const std::string& text) {
                "- Output ONLY the code or final answer.\n"
                "- DO NOT add any explanations, preamble, or markdown code fences.\n"
                "- START immediately with the solution.\n"
-               "- ZERO INDENTATION: every line must start at column 0, no leading spaces or tabs.";
+               "- Use correct indentation for the language. The code must compile and run without errors.";
     }
 }
 

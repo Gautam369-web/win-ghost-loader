@@ -1542,7 +1542,7 @@ static void DrawProcessing(HDC hdc, const RECT& rc,const OverlaySnapshot& view){
     // ── Title ──────────────────────────────────────────────────────────────
     HFONT fntB=CreateFontW(-13,0,0,0,FW_BOLD,0,0,0,DEFAULT_CHARSET,0,0,CLEARTYPE_QUALITY,FIXED_PITCH,L"Consolas");
     HFONT of=(HFONT)SelectObject(hdc,fntB);
-    SetTextColor(hdc, RGB(255,200,50));
+    SetTextColor(hdc, RGB(120,80,0));
     RECT tRc={6,4,rc.right-6,20};
     wchar_t title[80]={};
     swprintf_s(title,80,L"  %s  Processing...  [%s]  %s",
@@ -1584,26 +1584,26 @@ static void DrawProcessing(HDC hdc, const RECT& rc,const OverlaySnapshot& view){
         // Status icon
         COLORREF col;
         const wchar_t* icon;
-        if(steps[i].done)   { icon=L" \u2714"; col=RGB(0,220,80);   }  // ✔ green
-        else if(steps[i].active){ icon=sp;  col=RGB(255,200,50); }  // spinner yellow
-        else                { icon=L" \u25CB"; col=RGB(80,80,100); }  // ○ dim
+        if(steps[i].done)   { icon=L" \u2714"; col=RGB(0,140,50);   }  // ✔ green
+        else if(steps[i].active){ icon=sp;  col=RGB(120,80,0); }  // spinner yellow
+        else                { icon=L" \u25CB"; col=RGB(90,90,115); }  // ○ dim
 
         SetTextColor(hdc,col);
         RECT iRc={6,y,28,y+17}; DrawTextW(hdc,icon,-1,&iRc,DT_CENTER|DT_SINGLELINE);
 
         // Description
-        SetTextColor(hdc, steps[i].done?RGB(180,220,180):
-                          steps[i].active?RGB(255,230,130):RGB(80,80,100));
+        SetTextColor(hdc, steps[i].done?RGB(0,120,40):
+                          steps[i].active?RGB(140,100,0):RGB(90,90,115));
         RECT dRc={30,y,rc.right-60,y+17};
         DrawTextW(hdc,steps[i].desc,-1,&dRc,DT_LEFT|DT_SINGLELINE|DT_END_ELLIPSIS);
 
         // Badge
         if(steps[i].done){
-            SetTextColor(hdc,RGB(0,200,70));
+            SetTextColor(hdc,RGB(0,130,45));
             RECT bRc={rc.right-58,y,rc.right-6,y+17};
             DrawTextW(hdc,L"[ DONE ]",-1,&bRc,DT_RIGHT|DT_SINGLELINE);
         } else if(steps[i].active){
-            SetTextColor(hdc,RGB(255,200,50));
+            SetTextColor(hdc,RGB(120,80,0));
             RECT bRc={rc.right-74,y,rc.right-6,y+17};
             DrawTextW(hdc,L"[ WORKING ]",-1,&bRc,DT_RIGHT|DT_SINGLELINE);
         } else {
@@ -1616,7 +1616,7 @@ static void DrawProcessing(HDC hdc, const RECT& rc,const OverlaySnapshot& view){
 
     // ── MCQ question snippet (shown during MCQ processing) ─────────────────
     if(isMCQ && !view.mcqQuestion.empty()){
-        SetTextColor(hdc,RGB(150,150,100));
+        SetTextColor(hdc,RGB(80,80,60));
         RECT qRc={6,y+2,rc.right-6,y+16};
         std::wstring qSnip=L"\u00ab "+view.mcqQuestion;
         if(qSnip.size()>45) qSnip=qSnip.substr(0,44)+L"\u2026\u00bb";
@@ -1626,26 +1626,26 @@ static void DrawProcessing(HDC hdc, const RECT& rc,const OverlaySnapshot& view){
     }
 
     // ── Separator + status bar ─────────────────────────────────────────────
-    hline(y+4, RGB(60,50,15));
+    hline(y+4, RGB(180,180,195));
 
     // Last log message
-    SetTextColor(hdc,RGB(180,180,130));
+    SetTextColor(hdc,RGB(80,80,60));
     RECT sRc={6,y+7,rc.right-6,y+22};
     DrawTextW(hdc,(L"  "+AtoW(view.log.c_str())).c_str(),-1,&sRc,DT_LEFT|DT_SINGLELINE|DT_END_ELLIPSIS);
 
     // Pulse bar (animated)
     int barY=y+25, barH=8;
     RECT barbg={6,barY,rc.right-6,barY+barH};
-    HBRUSH bb=CreateSolidBrush(RGB(30,28,10)); FillRect(hdc,&barbg,bb); DeleteObject(bb);
+    HBRUSH bb=CreateSolidBrush(RGB(220,220,220)); FillRect(hdc,&barbg,bb); DeleteObject(bb);
     int barW=(rc.right-12);
     int pulse=(int)(barW*0.4f);
     int offset=((view.spin*8)%(barW+pulse)) - pulse;
     int x0=6+std::max(0,offset), x1=6+std::min(barW,offset+pulse);
     if(x1>x0){RECT pRc={x0,barY,x1,barY+barH};
-        HBRUSH pb=CreateSolidBrush(RGB(200,150,0));FillRect(hdc,&pRc,pb);DeleteObject(pb);}
+        HBRUSH pb=CreateSolidBrush(RGB(80,160,80));FillRect(hdc,&pRc,pb);DeleteObject(pb);}
 
     // F7=hide hint
-    SetTextColor(hdc,RGB(60,55,30));
+    SetTextColor(hdc,RGB(100,90,40));
     RECT hRc={6,barY+10,rc.right-6,rc.bottom-2};
     DrawTextW(hdc,L"  F7 = Hide this box",-1,&hRc,DT_LEFT|DT_SINGLELINE);
 
@@ -1658,7 +1658,7 @@ static void DrawShortcuts(HDC hdc, const RECT& rc,const OverlaySnapshot& view){
     HFONT of=(HFONT)SelectObject(hdc,fnt);
 
     // Title
-    SetTextColor(hdc, RGB(0,220,80));
+    SetTextColor(hdc, RGB(0,140,50));
     RECT tRc={6,4,rc.right-6,20};
     DrawTextW(hdc,L"  \u2691 VEDA  |  Hotkey Reference  |  F7=Hide",-1,&tRc,DT_LEFT|DT_SINGLELINE|DT_END_ELLIPSIS);
 
@@ -1667,18 +1667,18 @@ static void DrawShortcuts(HDC hdc, const RECT& rc,const OverlaySnapshot& view){
         HPEN p=CreatePen(PS_SOLID,1,c);HPEN op2=(HPEN)SelectObject(hdc,p);
         MoveToEx(hdc,4,y,NULL);LineTo(hdc,rc.right-4,y);
         SelectObject(hdc,op2);DeleteObject(p);};
-    hline(22,RGB(40,44,58));
+    hline(22,RGB(180,185,200));
 
     struct Row{const wchar_t* key; const wchar_t* desc; COLORREF c;} rows[]={
-        {L"F8",       L"Extract text + AI answer",     RGB(0,215,75)},
-        {L"Shift+F8", L"Cycle subject",                RGB(0,170,55)},
-        {L"F6",       L"Toggle stealth typing ON/OFF", RGB(100,200,255)},
-        {L"Ctrl+F6",  L"Load clipboard → buffer",      RGB(70,155,210)},
-        {L"F9",       L"Extract MCQ options",          RGB(210,180,70)},
-        {L"F12",      L"Reset buffer index to 0",      RGB(140,140,165)},
-        {L"F7",       L"Hide / Show this box",         RGB(150,100,230)},
-        {L"Alt+S",    L"Screenshot",                   RGB(130,130,155)},
-        {L"Alt+Q",    L"Quit Veda",                    RGB(210,70,70)},
+        {L"F8",       L"Extract text + AI answer",     RGB(0,130,45)},
+        {L"Shift+F8", L"Cycle subject",                RGB(0,110,35)},
+        {L"F6",       L"Toggle stealth typing ON/OFF", RGB(0,100,200)},
+        {L"Ctrl+F6",  L"Load clipboard → buffer",      RGB(0,100,190)},
+        {L"F9",       L"Extract MCQ options",          RGB(130,100,0)},
+        {L"F12",      L"Reset buffer index to 0",      RGB(90,90,120)},
+        {L"F7",       L"Hide / Show this box",         RGB(100,50,180)},
+        {L"Alt+S",    L"Screenshot",                   RGB(80,80,110)},
+        {L"Alt+Q",    L"Quit Veda",                    RGB(180,30,30)},
     };
 
     int y=26;
@@ -1686,16 +1686,16 @@ static void DrawShortcuts(HDC hdc, const RECT& rc,const OverlaySnapshot& view){
         SetTextColor(hdc, r.c);
         RECT kRc={6,y,95,y+15};
         DrawTextW(hdc,(std::wstring(L"  ")+r.key).c_str(),-1,&kRc,DT_LEFT|DT_SINGLELINE);
-        SetTextColor(hdc, RGB(155,155,170));
+        SetTextColor(hdc, RGB(80,80,100));
         RECT dRc={95,y,rc.right-6,y+15};
         DrawTextW(hdc,(std::wstring(L"\u2192 ")+r.desc).c_str(),-1,&dRc,DT_LEFT|DT_SINGLELINE|DT_END_ELLIPSIS);
         y+=16;
     }
 
-    hline(y+2, RGB(40,44,58));
+    hline(y+2, RGB(180,185,200));
 
     // Status row
-    SetTextColor(hdc, view.verified?RGB(0,220,80):RGB(255,200,60));
+    SetTextColor(hdc, view.verified?RGB(0,140,50):RGB(120,80,0));
     wchar_t st[100]={}; swprintf_s(st,100,L"  %s | Subj: %s",AtoW(view.status.c_str()).c_str(),SUBJECTS[view.subject]);
     RECT sRc={6,y+5,rc.right-6,rc.bottom-2};
     DrawTextW(hdc,st,-1,&sRc,DT_LEFT|DT_SINGLELINE|DT_END_ELLIPSIS);
@@ -1723,12 +1723,12 @@ static void DrawMCQResult(HDC hdc, const RECT& rc, const OverlaySnapshot& view){
     // ── Scrollbar ─────────────────────────────────────────────────────────
     if(maxScroll>0){
         RECT sbBg={rc.right-5,24,rc.right-1,rc.bottom-1};
-        HBRUSH sbBr=CreateSolidBrush(RGB(25,25,20)); FillRect(hdc,&sbBg,sbBr); DeleteObject(sbBr);
+        HBRUSH sbBr=CreateSolidBrush(RGB(230,230,230)); FillRect(hdc,&sbBg,sbBr); DeleteObject(sbBr);
         int sbH=(int)rc.bottom-25;
         int thumbH=std::max(14,(int)(sbH*((int)rc.bottom-24)/std::max(1,contentH)));
         int thumbY=24+(int)((sbH-thumbH)*scrollY/std::max(1,maxScroll));
         RECT sbThumb={rc.right-5,thumbY,rc.right-1,thumbY+thumbH};
-        HBRUSH th=CreateSolidBrush(RGB(130,110,40)); FillRect(hdc,&sbThumb,th); DeleteObject(th);
+        HBRUSH th=CreateSolidBrush(RGB(150,150,150)); FillRect(hdc,&sbThumb,th); DeleteObject(th);
     }
 
     // ── Frozen header (not scrolled) ──────────────────────────────────────
@@ -1736,15 +1736,15 @@ static void DrawMCQResult(HDC hdc, const RECT& rc, const OverlaySnapshot& view){
         HFONT fntB=CreateFontW(-12,0,0,0,FW_BOLD,0,0,0,DEFAULT_CHARSET,0,0,CLEARTYPE_QUALITY,FIXED_PITCH,L"Consolas");
         HFONT of=(HFONT)SelectObject(hdc,fntB);
         // Re-fill header background to cover any scroll bleed
-        HBRUSH hdrBg=CreateSolidBrush(RGB(11,13,18));
+        HBRUSH hdrBg=CreateSolidBrush(RGB(255,255,255));
         RECT hdrR={0,0,rc.right,23}; FillRect(hdc,&hdrR,hdrBg); DeleteObject(hdrBg);
-        SetTextColor(hdc,RGB(255,210,60));
+        SetTextColor(hdc,RGB(130,90,0));
         wchar_t ttl[64]={};
         swprintf_s(ttl,64,L"  \u2726 MCQ RESULT (%d opts)  F7=Hide",N);
         RECT tRc={4,4,rightEdge,20};
         DrawTextW(hdc,ttl,-1,&tRc,DT_LEFT|DT_SINGLELINE|DT_END_ELLIPSIS);
         SelectObject(hdc,of); DeleteObject(fntB);
-        HPEN sep=CreatePen(PS_SOLID,1,RGB(80,65,15));
+        HPEN sep=CreatePen(PS_SOLID,1,RGB(170,170,180));
         HPEN osep=(HPEN)SelectObject(hdc,sep);
         MoveToEx(hdc,4,22,NULL);LineTo(hdc,rightEdge,22);
         SelectObject(hdc,osep);DeleteObject(sep);
@@ -1762,12 +1762,12 @@ static void DrawMCQResult(HDC hdc, const RECT& rc, const OverlaySnapshot& view){
     // ── Question snippet ─────────────────────────────────────────────────
     if(!view.mcqQuestion.empty()){
         if(y>=23&&y<rc.bottom-14){
-            SetTextColor(hdc,RGB(150,150,110));
+            SetTextColor(hdc,RGB(80,80,60));
             RECT qRc={6,y,rightEdge,y+14};
             std::wstring ql=L" Q: "+view.mcqQuestion;
             DrawTextW(hdc,ql.c_str(),-1,&qRc,DT_LEFT|DT_SINGLELINE|DT_END_ELLIPSIS);
         }
-        y+=16; hline(y,RGB(42,40,18)); y+=5;
+        y+=16; hline(y,RGB(180,180,195)); y+=5;
     }
 
     // ── Options A-E ──────────────────────────────────────────────────────
@@ -1783,19 +1783,19 @@ static void DrawMCQResult(HDC hdc, const RECT& rc, const OverlaySnapshot& view){
             // Green highlight row for correct
             if(isCorrect){
                 RECT hiRc={4,std::max(23,y-1),rightEdge,std::min((int)rc.bottom-14,y+17)};
-                HBRUSH hiBr=CreateSolidBrush(RGB(5,55,10));
+                HBRUSH hiBr=CreateSolidBrush(RGB(200,255,210));
                 FillRect(hdc,&hiRc,hiBr); DeleteObject(hiBr);
             }
 
             int rowY=y;
             if(rowY>=23){
                 // Bullet
-                SetTextColor(hdc, isCorrect?RGB(0,240,80):RGB(48,48,68));
+                SetTextColor(hdc, isCorrect?RGB(0,150,55):RGB(100,100,130));
                 RECT bRc={5,rowY,18,rowY+14};
                 DrawTextW(hdc,isCorrect?L"\u25CF":L"\u25CB",-1,&bRc,DT_CENTER|DT_SINGLELINE);
 
                 // Option letter  "A:"
-                SetTextColor(hdc, isCorrect?RGB(60,255,100):RGB(80,80,100));
+                SetTextColor(hdc, isCorrect?RGB(0,160,55):RGB(90,90,115));
                 RECT lRc={18,rowY,33,rowY+14};
                 wchar_t lb[4]={}; swprintf_s(lb,4,L"%c:",thisOpt);
                 DrawTextW(hdc,lb,-1,&lRc,DT_LEFT|DT_SINGLELINE);
@@ -1804,17 +1804,17 @@ static void DrawMCQResult(HDC hdc, const RECT& rc, const OverlaySnapshot& view){
 
                 if(isCorrect){
                     // Corner badge  "[TOP-LEFT]"  on right
-                    SetTextColor(hdc,RGB(255,220,50));
+                    SetTextColor(hdc,RGB(120,80,0));
                     wchar_t cb[22]={}; swprintf_s(cb,22,L"[%s]",OPT_CORNERS[i]);
                     RECT cRc={rightEdge-98,rowY,rightEdge,rowY+14};
                     DrawTextW(hdc,cb,-1,&cRc,DT_RIGHT|DT_SINGLELINE);
                     // Option text in bright green
-                    SetTextColor(hdc,RGB(0,240,80));
+                    SetTextColor(hdc,RGB(0,150,55));
                     RECT tRc2={33,rowY,rightEdge-102,rowY+14};
                     std::wstring lbl=optTxt.empty()?L"\u2190 CORRECT ANSWER":optTxt;
                     DrawTextW(hdc,lbl.c_str(),-1,&tRc2,DT_LEFT|DT_SINGLELINE|DT_END_ELLIPSIS);
                 } else {
-                    SetTextColor(hdc,RGB(75,75,92));
+                    SetTextColor(hdc,RGB(100,100,120));
                     RECT tRc2={33,rowY,rightEdge,rowY+14};
                     std::wstring lbl=optTxt.empty()?L"\u2014":optTxt;
                     DrawTextW(hdc,lbl.c_str(),-1,&tRc2,DT_LEFT|DT_SINGLELINE|DT_END_ELLIPSIS);
@@ -1824,11 +1824,11 @@ static void DrawMCQResult(HDC hdc, const RECT& rc, const OverlaySnapshot& view){
         y+=18;
     }
 
-    hline(y+2,RGB(55,50,18)); y+=8;
+    hline(y+2,RGB(180,180,195)); y+=8;
 
     // ── Mouse corner row ─────────────────────────────────────────────────
     if(y>=23&&y<rc.bottom-14){
-        SetTextColor(hdc,RGB(255,200,50));
+        SetTextColor(hdc,RGB(120,80,0));
         RECT mRc={6,y,rightEdge,y+14};
         std::wstring mm=L" \u2192 Mouse \u2192 "+view.mcqCorner+L" corner";
         DrawTextW(hdc,mm.c_str(),-1,&mRc,DT_LEFT|DT_SINGLELINE|DT_END_ELLIPSIS);
@@ -1837,7 +1837,7 @@ static void DrawMCQResult(HDC hdc, const RECT& rc, const OverlaySnapshot& view){
 
     // Scroll hint
     if(maxScroll>0&&y>=23&&y<rc.bottom-14){
-        SetTextColor(hdc,RGB(55,55,38));
+        SetTextColor(hdc,RGB(110,110,90));
         RECT sh={6,y,rightEdge,y+13};
         DrawTextW(hdc,L" \u2191\u2193 scroll",-1,&sh,DT_LEFT|DT_SINGLELINE);
     }
@@ -1847,10 +1847,10 @@ static void DrawMCQResult(HDC hdc, const RECT& rc, const OverlaySnapshot& view){
 
     // ── Pinned footer: log line ───────────────────────────────────────────
     {
-        HBRUSH foot=CreateSolidBrush(RGB(11,13,18));
+        HBRUSH foot=CreateSolidBrush(RGB(255,255,255));
         RECT footBg={0,rc.bottom-14,rc.right,rc.bottom};
         FillRect(hdc,&footBg,foot); DeleteObject(foot);
-        SetTextColor(hdc,RGB(50,50,38));
+        SetTextColor(hdc,RGB(120,120,100));
         RECT sRc={5,rc.bottom-13,rightEdge,rc.bottom-1};
         DrawTextW(hdc,(L" "+AtoW(view.log.c_str())).c_str(),-1,&sRc,DT_LEFT|DT_SINGLELINE|DT_END_ELLIPSIS);
     }
@@ -1898,29 +1898,29 @@ static void DrawAnswer(HDC hdc, const RECT& rc,const OverlaySnapshot& view){
     // ── Frozen header ────────────────────────────────────────────────────
     {
         // Clear header strip
-        HBRUSH hb=CreateSolidBrush(RGB(11,13,18));
+        HBRUSH hb=CreateSolidBrush(RGB(255,255,255));
         RECT hR={0,0,(int)rc.right,HEADER_H}; FillRect(hdc,&hR,hb); DeleteObject(hb);
         HFONT fntB=CreateFontW(-12,0,0,0,FW_BOLD,0,0,0,DEFAULT_CHARSET,0,0,CLEARTYPE_QUALITY,FIXED_PITCH,L"Consolas");
         HFONT of=(HFONT)SelectObject(hdc,fntB);
-        SetTextColor(hdc, stOn?RGB(0,220,80):RGB(80,140,255));
+        SetTextColor(hdc, stOn?RGB(0,140,50):RGB(30,90,210));
         wchar_t title[100]={};
         swprintf_s(title,100,L"  AI Answer | %s | %d/%d (%d%%) | F7=Hide",
             SUBJECTS[view.subject],idx,total,pct);
         RECT tRc={4,4,rightEdge,20};
         DrawTextW(hdc,title,-1,&tRc,DT_LEFT|DT_SINGLELINE|DT_END_ELLIPSIS);
         SelectObject(hdc,of); DeleteObject(fntB);
-        hline(HEADER_H-1,RGB(40,44,58));
+        hline(HEADER_H-1,RGB(180,185,200));
     }
 
     // ── Scrollbar ────────────────────────────────────────────────────────
     if(maxScroll>0){
         RECT sbBg={(int)rc.right-5,HEADER_H,(int)rc.right-1,(int)rc.bottom-FOOTER_H};
-        HBRUSH sbBr=CreateSolidBrush(RGB(22,22,28)); FillRect(hdc,&sbBg,sbBr); DeleteObject(sbBr);
+        HBRUSH sbBr=CreateSolidBrush(RGB(230,230,230)); FillRect(hdc,&sbBg,sbBr); DeleteObject(sbBr);
         int sbH=(int)rc.bottom-FOOTER_H-HEADER_H;
         int thumbH=std::max(12,(int)(sbH*visH/std::max(1,contentH)));
         int thumbY=HEADER_H+(int)((sbH-thumbH)*scrollY/std::max(1,maxScroll));
         RECT sbTh={(int)rc.right-5,thumbY,(int)rc.right-1,thumbY+thumbH};
-        HBRUSH th=CreateSolidBrush(stOn?RGB(0,120,50):RGB(60,100,200)); FillRect(hdc,&sbTh,th); DeleteObject(th);
+        HBRUSH th=CreateSolidBrush(stOn?RGB(0,150,60):RGB(50,110,210)); FillRect(hdc,&sbTh,th); DeleteObject(th);
     }
 
     // ── Scrollable content area (clipped) ────────────────────────────────
@@ -1930,7 +1930,7 @@ static void DrawAnswer(HDC hdc, const RECT& rc,const OverlaySnapshot& view){
 
         HFONT fntC=CreateFontW(-12,0,0,0,FW_NORMAL,0,0,0,DEFAULT_CHARSET,0,0,CLEARTYPE_QUALITY,FIXED_PITCH,L"Consolas");
         HFONT ofc=(HFONT)SelectObject(hdc,fntC);
-        SetTextColor(hdc, RGB(215,235,215));
+        SetTextColor(hdc, RGB(30,30,30));
 
         int y = HEADER_H + PAD - scrollY;
         for(size_t li=0; li<ansLines.size(); li++){
@@ -1944,10 +1944,10 @@ static void DrawAnswer(HDC hdc, const RECT& rc,const OverlaySnapshot& view){
         // Scroll hint at bottom of content (when scrollable)
         if(maxScroll>0){
             int hintY=(int)rc.bottom-FOOTER_H-14;
-            HBRUSH hintBg=CreateSolidBrush(RGB(11,13,18));
+            HBRUSH hintBg=CreateSolidBrush(RGB(255,255,255));
             RECT hintR={0,hintY,(int)rc.right,(int)rc.bottom-FOOTER_H};
             FillRect(hdc,&hintR,hintBg); DeleteObject(hintBg);
-            SetTextColor(hdc,RGB(55,60,85));
+            SetTextColor(hdc,RGB(100,100,130));
             RECT hRc={6,hintY,rightEdge,hintY+13};
             DrawTextW(hdc,L" \u2191\u2193 mouse wheel to scroll",-1,&hRc,DT_LEFT|DT_SINGLELINE);
         }
@@ -1959,29 +1959,29 @@ static void DrawAnswer(HDC hdc, const RECT& rc,const OverlaySnapshot& view){
     // ── Frozen footer: separator + progress bar + log ────────────────────
     {
         int footTop=(int)rc.bottom-FOOTER_H;
-        HBRUSH fb=CreateSolidBrush(RGB(11,13,18));
+        HBRUSH fb=CreateSolidBrush(RGB(255,255,255));
         RECT fR={0,footTop,(int)rc.right,(int)rc.bottom}; FillRect(hdc,&fR,fb); DeleteObject(fb);
-        hline(footTop+1,RGB(40,44,58));
+        hline(footTop+1,RGB(180,185,200));
 
         // Progress bar
         HFONT fntS=CreateFontW(-11,0,0,0,FW_NORMAL,0,0,0,DEFAULT_CHARSET,0,0,DEFAULT_QUALITY,FIXED_PITCH,L"Consolas");
         HFONT ofs=(HFONT)SelectObject(hdc,fntS);
         int barTop=footTop+4, barBot=barTop+14;
         RECT barbg={6,barTop,(int)rc.right-6,barBot};
-        HBRUSH bb=CreateSolidBrush(RGB(22,24,34)); FillRect(hdc,&barbg,bb); DeleteObject(bb);
+        HBRUSH bb=CreateSolidBrush(RGB(230,230,230)); FillRect(hdc,&barbg,bb); DeleteObject(bb);
         if(total>0){
             int fw=(int)((rc.right-12)*(long long)idx/total);
             RECT bf={6,barTop,6+fw,barBot};
-            HBRUSH bf2=CreateSolidBrush(stOn?RGB(0,140,60):RGB(50,100,200));
+            HBRUSH bf2=CreateSolidBrush(stOn?RGB(0,140,60):RGB(50,110,200));
             FillRect(hdc,&bf,bf2); DeleteObject(bf2);
         }
-        SetTextColor(hdc,RGB(210,210,210));
+        SetTextColor(hdc,RGB(30,30,30));
         wchar_t prog[70]={}; swprintf_s(prog,70,L" Buffer: %d/%d (%d%%) | %s",
             idx,total,pct,stOn?L"STEALTH ON":L"STEALTH OFF");
         DrawTextW(hdc,prog,-1,&barbg,DT_LEFT|DT_SINGLELINE|DT_VCENTER);
 
         // Log line
-        SetTextColor(hdc,RGB(110,110,130));
+        SetTextColor(hdc,RGB(80,80,100));
         RECT sRc={6,barBot+3,(int)rc.right-6,(int)rc.bottom-2};
         DrawTextW(hdc,(L" "+AtoW(view.log.c_str())).c_str(),-1,&sRc,DT_LEFT|DT_SINGLELINE|DT_END_ELLIPSIS);
 
@@ -1995,13 +1995,13 @@ static void DrawOverlay(HWND hwnd){
     PAINTSTRUCT ps; HDC hdc=BeginPaint(hwnd,&ps);
     RECT rc; GetClientRect(hwnd,&rc);
 
-    // Dark background
-    HBRUSH bg=CreateSolidBrush(RGB(11,13,18)); FillRect(hdc,&rc,bg); DeleteObject(bg);
+    // White background (20% opacity)
+    HBRUSH bg=CreateSolidBrush(RGB(255,255,255)); FillRect(hdc,&rc,bg); DeleteObject(bg);
 
     // Border: green=stealth, blue=answer, yellow=verifying, dim=idle
-    COLORREF bc = view.typing     ? RGB(0,200,65) :
-                  (view.mode==1) ? RGB(55,120,255) :
-                  (!view.verified) ? RGB(255,195,0) : RGB(50,60,85);
+    COLORREF bc = view.typing     ? RGB(0,130,45) :
+                  (view.mode==1) ? RGB(30,90,210) :
+                  (!view.verified) ? RGB(255,195,0) : RGB(160,165,185);
     HPEN bp=CreatePen(PS_SOLID,2,bc); HPEN op=(HPEN)SelectObject(hdc,bp);
     HBRUSH ob=(HBRUSH)SelectObject(hdc,GetStockObject(NULL_BRUSH));
     Rectangle(hdc,1,1,rc.right-1,rc.bottom-1);
@@ -2017,10 +2017,10 @@ static void DrawOverlay(HWND hwnd){
     else if(view.mode==3){
         HFONT font=CreateFontW(-13,0,0,0,FW_NORMAL,0,0,0,DEFAULT_CHARSET,0,0,CLEARTYPE_QUALITY,FIXED_PITCH,L"Consolas");
         HFONT old=(HFONT)SelectObject(hdc,font);
-        SetTextColor(hdc,RGB(255,130,110));
+        SetTextColor(hdc,RGB(200,30,30));
         RECT title={8,5,rc.right-8,23};
         DrawTextW(hdc,L"Request failed | F7 hide/show",-1,&title,DT_SINGLELINE);
-        SetTextColor(hdc,RGB(225,225,230));
+        SetTextColor(hdc,RGB(20,20,20));
         RECT body={8,27,rc.right-8,rc.bottom-23};
         DrawTextW(hdc,view.answer.c_str(),-1,&body,DT_WORDBREAK|DT_NOPREFIX|DT_END_ELLIPSIS);
         RECT footer={8,rc.bottom-20,rc.right-8,rc.bottom-3};
@@ -2067,7 +2067,7 @@ static LRESULT CALLBACK OvlWndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp){
 static DWORD WINAPI OverlayThread(LPVOID){
     WNDCLASSEXW wc={}; wc.cbSize=sizeof(wc); wc.lpfnWndProc=OvlWndProc;
     wc.hInstance=g_hModule; wc.lpszClassName=L"SCOverlay2";
-    wc.hCursor=LoadCursorW(NULL,IDC_ARROW); wc.hbrBackground=(HBRUSH)GetStockObject(BLACK_BRUSH);
+    wc.hCursor=LoadCursorW(NULL,IDC_ARROW); wc.hbrBackground=(HBRUSH)GetStockObject(WHITE_BRUSH);
     RegisterClassExW(&wc);
     int scrW=GetSystemMetrics(SM_CXSCREEN),scrH=GetSystemMetrics(SM_CYSCREEN);
     g_overlayHwnd=CreateWindowExW(
@@ -2076,7 +2076,7 @@ static DWORD WINAPI OverlayThread(LPVOID){
         scrW-OVL_W-10,scrH-OVL_H-50,OVL_W,OVL_H,
         NULL,NULL,g_hModule,NULL);
     if(!g_overlayHwnd){UnregisterClassW(L"SCOverlay2",g_hModule);return 1;} if(g_stopping.load()){DestroyWindow(g_overlayHwnd);g_overlayHwnd=nullptr;UnregisterClassW(L"SCOverlay2",g_hModule);return 0;}
-    SetLayeredWindowAttributes(g_overlayHwnd,0,248,LWA_ALPHA);
+    SetLayeredWindowAttributes(g_overlayHwnd,0,51,LWA_ALPHA);
     ShowWindow(g_overlayHwnd,SW_SHOWNA); UpdateWindow(g_overlayHwnd);
     SetTimer(g_overlayHwnd,1,250,NULL);
     MSG msg; while(GetMessageW(&msg,NULL,0,0)>0){TranslateMessage(&msg);DispatchMessageW(&msg);}

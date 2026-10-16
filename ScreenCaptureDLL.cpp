@@ -944,6 +944,17 @@ static std::string CallGemini(const std::string& prompt){
     t_debug+="\nHTTP "+std::to_string(response.status)+" | Windows "+std::to_string(response.windowsError)
         +" | "+std::to_string(GetTickCount64()-started)+" ms";
     if(RequestCancelled())return {};
+    // Retry once on 503 (server overload) after 2 s
+    if(response.status==503&&!RequestCancelled()){
+        SetLog("MCQ: API busy (503). Retrying in 2s...");
+        Sleep(2000);
+        if(!RequestCancelled()){
+            ULONGLONG started2=GetTickCount64();
+            response=HttpRequest(url,&payload,25000);
+            t_debug+="\nRETRY HTTP "+std::to_string(response.status)
+                    +" | "+std::to_string(GetTickCount64()-started2)+" ms";
+        }
+    }
     if(!response.ok()){
         t_aiError=response.status==429?"AI capacity busy; wait before retrying.":response.error==HttpError::status?"AI service returned HTTP "+std::to_string(response.status):"AI request failed or timed out.";
         auto detail=SafeServiceError(response.body);
@@ -1200,6 +1211,30 @@ static char         g_mcqLetter   = 0;     // 0 = not MCQ result; 'A'-'D' when d
 static std::wstring g_mcqQuestion;          // truncated question snippet for display
 static std::wstring g_mcqCorner;            // e.g. L"TOP-LEFT"
 
+// ── CleanMCQText: strip noise and hard-cap before sending to AI ──────────────
+// MCQ questions are short (<600 chars usually). Large dumps = page garbage.
+// We keep at most MCQ_MAX_CHARS chars; we also collapse runs of whitespace.
+static const size_t MCQ_MAX_CHARS = 1500;
+static std::string CleanMCQText(const std::string& raw){
+    std::string out;
+    out.reserve(raw.size());
+    bool lastWasSpace=false;
+    for(size_t i=0;i<raw.size()&&out.size()<MCQ_MAX_CHARS;i++){
+        unsigned char c=(unsigned char)raw[i];
+        if(c=='\r') continue;                    // strip carriage returns
+        if(c=='\t') c=' ';                       // tab -> space
+        if(c==' '||c=='\n'){
+            // collapse multiple blanks/newlines but keep single newlines
+            if(!lastWasSpace){out+=(char)c;lastWasSpace=true;}
+        } else {
+            out+=(char)c;lastWasSpace=false;
+        }
+    }
+    // trim trailing whitespace
+    while(!out.empty()&&(out.back()==' '||out.back()=='\n')) out.pop_back();
+    return out;
+}
+
 static DWORD WINAPI MCQExtractThread(LPVOID){
     if(RequestCancelled())return 0;
     t_mcqRequest=true;
@@ -1213,8 +1248,11 @@ static DWORD WINAPI MCQExtractThread(LPVOID){
     SetLog("MCQ: Reading question text from screen...");
     SetProcessing(3,false,false);
     std::string question=ExtractRequestText();
-    t_extractedBytes=question.size();
+    t_extractedBytes=question.size();          // raw byte count (before cleaning)
     t_debug+="\nExtracted bytes: "+std::to_string(t_extractedBytes);
+    // Strip noise & hard-cap to MCQ_MAX_CHARS before sending to AI
+    bool wasTrimmed=(question.size()>MCQ_MAX_CHARS);
+    question=CleanMCQText(question);
 
     if(RequestCancelled())return 0;
     if(question.empty()){
@@ -1222,13 +1260,14 @@ static DWORD WINAPI MCQExtractThread(LPVOID){
         return 0;
     }
 
-    // Store truncated question snippet (first 80 chars, single-line) for overlay
+    // Store snippet for overlay (from cleaned question)
     { std::string snippet=question.substr(0,std::min((size_t)80,question.size()));
       for(char& c:snippet) if(c=='\n'||c=='\r'||c=='\t') c=' ';
       StateLock lk(g_stateMutex);
       g_mcqQuestion=FromUtf8(snippet);
     }
-    SetLog(("MCQ: "+std::to_string(t_extractedBytes)+" bytes read. Analyzing question...").c_str());
+    SetLog(("MCQ: "+std::to_string(t_extractedBytes)+" bytes raw"
+           +(wasTrimmed?" \u2192 trimmed to "+std::to_string(question.size())+" chars":"")+". Analyzing...").c_str());
 
     // ── Step 2: Asking Gemini AI ────────────────────────────────────
     SetProcessing(3,true,false);

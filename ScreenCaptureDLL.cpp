@@ -1000,17 +1000,24 @@ static bool InjectChar(wchar_t ch){
         inputs[i].ki.dwFlags=(vk?0:KEYEVENTF_UNICODE)|(i?KEYEVENTF_KEYUP:0);
     }
     if(SendInput(2,inputs,sizeof(INPUT))!=2) return false;
-    // After Enter: send VK_HOME to cancel editor auto-indent so our own
-    // leading whitespace is the only indentation applied.
+    // After Enter: the editor auto-indents (adds spaces on the new line).
+    // Fix: End → Shift+Home (select all auto-indent) → Delete (erase it).
+    // Then the stealth typer types the original indentation from the buffer.
     if(ch==L'\n'){
-        INPUT home[2]={};
-        for(int i=0;i<2;++i){
-            home[i].type=INPUT_KEYBOARD;
-            home[i].ki.dwExtraInfo=STEALTH_MAGIC;
-            home[i].ki.wVk=VK_HOME;
-            home[i].ki.dwFlags=(i?KEYEVENTF_KEYUP:0);
-        }
-        SendInput(2,home,sizeof(INPUT));
+        Sleep(25); // let editor finish applying auto-indent
+        INPUT clr[8]={};
+        // End (move to end of auto-indented region, wherever cursor may be)
+        clr[0].type=INPUT_KEYBOARD; clr[0].ki.wVk=VK_END;   clr[0].ki.dwExtraInfo=STEALTH_MAGIC; clr[0].ki.dwFlags=0;
+        clr[1].type=INPUT_KEYBOARD; clr[1].ki.wVk=VK_END;   clr[1].ki.dwExtraInfo=STEALTH_MAGIC; clr[1].ki.dwFlags=KEYEVENTF_KEYUP;
+        // Shift+Home (select entire new-line content back to col 0)
+        clr[2].type=INPUT_KEYBOARD; clr[2].ki.wVk=VK_SHIFT; clr[2].ki.dwExtraInfo=STEALTH_MAGIC; clr[2].ki.dwFlags=0;
+        clr[3].type=INPUT_KEYBOARD; clr[3].ki.wVk=VK_HOME;  clr[3].ki.dwExtraInfo=STEALTH_MAGIC; clr[3].ki.dwFlags=0;
+        clr[4].type=INPUT_KEYBOARD; clr[4].ki.wVk=VK_HOME;  clr[4].ki.dwExtraInfo=STEALTH_MAGIC; clr[4].ki.dwFlags=KEYEVENTF_KEYUP;
+        clr[5].type=INPUT_KEYBOARD; clr[5].ki.wVk=VK_SHIFT; clr[5].ki.dwExtraInfo=STEALTH_MAGIC; clr[5].ki.dwFlags=KEYEVENTF_KEYUP;
+        // Delete (remove selection — a no-op if line was already empty)
+        clr[6].type=INPUT_KEYBOARD; clr[6].ki.wVk=VK_DELETE; clr[6].ki.dwExtraInfo=STEALTH_MAGIC; clr[6].ki.dwFlags=0;
+        clr[7].type=INPUT_KEYBOARD; clr[7].ki.wVk=VK_DELETE; clr[7].ki.dwExtraInfo=STEALTH_MAGIC; clr[7].ki.dwFlags=KEYEVENTF_KEYUP;
+        SendInput(8,clr,sizeof(INPUT));
     }
     g_lastTyped=ch; return true;
 }

@@ -1000,6 +1000,18 @@ static bool InjectChar(wchar_t ch){
         inputs[i].ki.dwFlags=(vk?0:KEYEVENTF_UNICODE)|(i?KEYEVENTF_KEYUP:0);
     }
     if(SendInput(2,inputs,sizeof(INPUT))!=2) return false;
+    // After Enter: send VK_HOME to cancel editor auto-indent so our own
+    // leading whitespace is the only indentation applied.
+    if(ch==L'\n'){
+        INPUT home[2]={};
+        for(int i=0;i<2;++i){
+            home[i].type=INPUT_KEYBOARD;
+            home[i].ki.dwExtraInfo=STEALTH_MAGIC;
+            home[i].ki.wVk=VK_HOME;
+            home[i].ki.dwFlags=(i?KEYEVENTF_KEYUP:0);
+        }
+        SendInput(2,home,sizeof(INPUT));
+    }
     g_lastTyped=ch; return true;
 }
 

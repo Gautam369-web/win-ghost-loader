@@ -1319,21 +1319,34 @@ static DWORD WINAPI MCQExtractThread(LPVOID){
         return 0;
     }
 
-    // Store snippet for overlay — skip junk header lines (app title etc)
-    { std::string snipSrc=question;
-      // Skip lines that look like labels/headers (no ? and shorter than 10 chars)
-      size_t skipTo=0;
-      for(size_t si=0;si<snipSrc.size();){
-          size_t nl=snipSrc.find('\n',si);
-          std::string firstLine=(nl==std::string::npos)?snipSrc.substr(si):snipSrc.substr(si,nl-si);
-          // Use this line as snippet start if it has substance (>=15 chars)
-          if(firstLine.size()>=15){ skipTo=si; break; }
-          si=(nl==std::string::npos)?snipSrc.size():nl+1;
+    // Store Q: snippet — skip "QUESTION:" prefix and short label lines
+    { std::string snipSrc = question;
+      // Strip leading junk tokens: "QUESTION:", "Question:", numbers, short words
+      // Find first line that looks like the actual question (has letters+punctuation, >=20 chars)
+      // or if none found, use the whole thing from char 0
+      size_t skipTo = 0;
+      {
+        size_t si = 0;
+        while(si < snipSrc.size()){
+            size_t nl = snipSrc.find('\n', si);
+            size_t len = (nl==std::string::npos) ? snipSrc.size()-si : nl-si;
+            std::string ln = snipSrc.substr(si, len);
+            // Strip "QUESTION:" prefix token if present
+            if(ln.size()>=8 && ln.substr(0,8)=="QUESTION"){ si=(nl==std::string::npos)?snipSrc.size():nl+1; continue; }
+            if(ln.size()>=8 && ln.substr(0,8)=="Question"){ si=(nl==std::string::npos)?snipSrc.size():nl+1; continue; }
+            // Skip very short lines (app title, labels < 5 chars)
+            if(ln.size()<5){ si=(nl==std::string::npos)?snipSrc.size():nl+1; continue; }
+            // Found a real line
+            skipTo=si; break;
+        }
       }
-      std::string snippet=snipSrc.substr(skipTo, std::min((size_t)90, snipSrc.size()-skipTo));
+      std::string snippet = snipSrc.substr(skipTo, std::min((size_t)90, snipSrc.size()-skipTo));
       for(char& c:snippet) if(c=='\n'||c=='\r'||c=='\t') c=' ';
+      // Collapse multiple spaces
+      std::string snippetClean; bool sp2=false;
+      for(char c:snippet){if(c==' '){if(!sp2){snippetClean+=c;sp2=true;}}else{snippetClean+=c;sp2=false;}}
       StateLock lk(g_stateMutex);
-      g_mcqQuestion=FromUtf8(snippet);
+      g_mcqQuestion = FromUtf8(snippetClean);
     }
     // ── Parse option lines from cleaned text ─────────────────────────
     { StateLock lk(g_stateMutex);
@@ -1347,17 +1360,42 @@ static DWORD WINAPI MCQExtractThread(LPVOID){
     SetLog("MCQ: Sending to Gemini AI for analysis...");
 
     std::string prompt=
-        "You are solving a multiple-choice question (MCQ). "
-        "Read the question and all options carefully, then identify the correct answer. "
-        "If the question or its options are missing or ambiguous, reply exactly: UNKNOWN\n"
-        "Otherwise reply ONLY a single uppercase letter: A, B, C, D, or E -- nothing else.\n\n"
+        "You are solving a multiple-choice question (MCQ).\n"
+        "Read the question and ALL options carefully, then identify the correct answer.\n"
+        "If the question or its options are missing or too ambiguous, reply exactly: UNKNOWN\n"
+        "Otherwise reply in this EXACT format (nothing else):\n"
+        "LETTER|exact option text\n"
+        "Example: D|Push  or  B|Quick Sort\n"
+        "The LETTER must be A, B, C, D, or E.\n"
+        "The option text must be the exact wording of the correct option.\n\n"
         "Question and options:\n"+question;
     std::string answer=CallGemini(prompt);
 
     if(RequestCancelled())return 0;
     if(answer.empty()){PublishFailure(t_aiError.c_str());return 0;}
 
-    char letter=ParseMCQLetter(answer);
+    // Parse LETTER|OptionText response (or fall back to single-letter)
+    char letter=0;
+    std::string aiOptionText;
+    {
+        std::string trimmed=TrimStr(answer);
+        // Try "X|text" format first
+        if(trimmed.size()>=3 && trimmed[1]=='|' &&
+           trimmed[0]>='A' && trimmed[0]<='E'){
+            letter=trimmed[0];
+            aiOptionText=TrimStr(trimmed.substr(2));
+        } else {
+            // Fallback: try single letter
+            letter=ParseMCQLetter(trimmed);
+        }
+    }
+    // If AI gave us the option text and we don't have it from parsing yet, store it
+    if(letter && !aiOptionText.empty()){
+        StateLock lk(g_stateMutex);
+        int li=letter-'A';
+        if(li>=0&&li<5&&g_mcqOptions[li].empty())
+            g_mcqOptions[li]=FromUtf8(aiOptionText);
+    }
     if(!letter){
         PublishFailure(TrimStr(answer)=="UNKNOWN"?
             "AI returned UNKNOWN: question or options missing or ambiguous. Point at the full question and retry.":
@@ -1978,7 +2016,7 @@ static DWORD WINAPI OverlayThread(LPVOID){
         scrW-OVL_W-10,scrH-OVL_H-50,OVL_W,OVL_H,
         NULL,NULL,g_hModule,NULL);
     if(!g_overlayHwnd){UnregisterClassW(L"SCOverlay2",g_hModule);return 1;} if(g_stopping.load()){DestroyWindow(g_overlayHwnd);g_overlayHwnd=nullptr;UnregisterClassW(L"SCOverlay2",g_hModule);return 0;}
-    SetLayeredWindowAttributes(g_overlayHwnd,0,220,LWA_ALPHA);
+    SetLayeredWindowAttributes(g_overlayHwnd,0,248,LWA_ALPHA);
     ShowWindow(g_overlayHwnd,SW_SHOWNA); UpdateWindow(g_overlayHwnd);
     SetTimer(g_overlayHwnd,1,250,NULL);
     MSG msg; while(GetMessageW(&msg,NULL,0,0)>0){TranslateMessage(&msg);DispatchMessageW(&msg);}

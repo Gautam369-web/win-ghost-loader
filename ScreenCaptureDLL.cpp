@@ -1545,7 +1545,7 @@ static void DrawProcessing(HDC hdc, const RECT& rc,const OverlaySnapshot& view){
     SetTextColor(hdc, RGB(120,80,0));
     RECT tRc={6,4,rc.right-6,20};
     wchar_t title[80]={};
-    swprintf_s(title,80,L"  %s  Processing...  [%s]  %s",
+    swprintf_s(title,80,L"%s  Processing...  [%s]  %s",
         sp, SUBJECTS[view.subject], isMCQ?L"MCQ":L"F8");
     DrawTextW(hdc,title,-1,&tRc,DT_LEFT|DT_SINGLELINE|DT_END_ELLIPSIS);
     SelectObject(hdc,of); DeleteObject(fntB);
@@ -1631,7 +1631,7 @@ static void DrawProcessing(HDC hdc, const RECT& rc,const OverlaySnapshot& view){
     // Last log message
     SetTextColor(hdc,RGB(80,80,60));
     RECT sRc={6,y+7,rc.right-6,y+22};
-    DrawTextW(hdc,(L"  "+AtoW(view.log.c_str())).c_str(),-1,&sRc,DT_LEFT|DT_SINGLELINE|DT_END_ELLIPSIS);
+    DrawTextW(hdc,AtoW(view.log.c_str()).c_str(),-1,&sRc,DT_LEFT|DT_SINGLELINE|DT_END_ELLIPSIS);
 
     // Pulse bar (animated)
     int barY=y+25, barH=8;
@@ -1647,7 +1647,7 @@ static void DrawProcessing(HDC hdc, const RECT& rc,const OverlaySnapshot& view){
     // F7=hide hint
     SetTextColor(hdc,RGB(100,90,40));
     RECT hRc={6,barY+10,rc.right-6,rc.bottom-2};
-    DrawTextW(hdc,L"  F7 = Hide this box",-1,&hRc,DT_LEFT|DT_SINGLELINE);
+    DrawTextW(hdc,L"F7 = Hide this box",-1,&hRc,DT_LEFT|DT_SINGLELINE);
 
     SelectObject(hdc,ofc); DeleteObject(fnt);
 }
@@ -1660,7 +1660,7 @@ static void DrawShortcuts(HDC hdc, const RECT& rc,const OverlaySnapshot& view){
     // Title
     SetTextColor(hdc, RGB(0,140,50));
     RECT tRc={6,4,rc.right-6,20};
-    DrawTextW(hdc,L"  \u2691 VEDA  |  Hotkey Reference  |  F7=Hide",-1,&tRc,DT_LEFT|DT_SINGLELINE|DT_END_ELLIPSIS);
+    DrawTextW(hdc,L"\u2691 VEDA  |  Hotkey Reference  |  F7=Hide",-1,&tRc,DT_LEFT|DT_SINGLELINE|DT_END_ELLIPSIS);
 
     // Separator
     auto hline=[&](int y, COLORREF c){
@@ -1685,7 +1685,7 @@ static void DrawShortcuts(HDC hdc, const RECT& rc,const OverlaySnapshot& view){
     for(auto& r:rows){
         SetTextColor(hdc, r.c);
         RECT kRc={6,y,95,y+15};
-        DrawTextW(hdc,(std::wstring(L"  ")+r.key).c_str(),-1,&kRc,DT_LEFT|DT_SINGLELINE);
+        DrawTextW(hdc,r.key,-1,&kRc,DT_LEFT|DT_SINGLELINE);
         SetTextColor(hdc, RGB(80,80,100));
         RECT dRc={95,y,rc.right-6,y+15};
         DrawTextW(hdc,(std::wstring(L"\u2192 ")+r.desc).c_str(),-1,&dRc,DT_LEFT|DT_SINGLELINE|DT_END_ELLIPSIS);
@@ -1696,7 +1696,7 @@ static void DrawShortcuts(HDC hdc, const RECT& rc,const OverlaySnapshot& view){
 
     // Status row
     SetTextColor(hdc, view.verified?RGB(0,140,50):RGB(120,80,0));
-    wchar_t st[100]={}; swprintf_s(st,100,L"  %s | Subj: %s",AtoW(view.status.c_str()).c_str(),SUBJECTS[view.subject]);
+    wchar_t st[100]={}; swprintf_s(st,100,L"%s | Subj: %s",AtoW(view.status.c_str()).c_str(),SUBJECTS[view.subject]);
     RECT sRc={6,y+5,rc.right-6,rc.bottom-2};
     DrawTextW(hdc,st,-1,&sRc,DT_LEFT|DT_SINGLELINE|DT_END_ELLIPSIS);
 
@@ -1740,7 +1740,7 @@ static void DrawMCQResult(HDC hdc, const RECT& rc, const OverlaySnapshot& view){
         RECT hdrR={0,0,rc.right,23}; FillRect(hdc,&hdrR,hdrBg); DeleteObject(hdrBg);
         SetTextColor(hdc,RGB(130,90,0));
         wchar_t ttl[64]={};
-        swprintf_s(ttl,64,L"  \u2726 MCQ RESULT (%d opts)  F7=Hide",N);
+        swprintf_s(ttl,64,L"\u2726 MCQ RESULT (%d opts)  F7=Hide",N);
         RECT tRc={4,4,rightEdge,20};
         DrawTextW(hdc,ttl,-1,&tRc,DT_LEFT|DT_SINGLELINE|DT_END_ELLIPSIS);
         SelectObject(hdc,of); DeleteObject(fntB);
@@ -1764,7 +1764,7 @@ static void DrawMCQResult(HDC hdc, const RECT& rc, const OverlaySnapshot& view){
         if(y>=23&&y<rc.bottom-14){
             SetTextColor(hdc,RGB(80,80,60));
             RECT qRc={6,y,rightEdge,y+14};
-            std::wstring ql=L" Q: "+view.mcqQuestion;
+            std::wstring ql=L"Q: "+view.mcqQuestion;
             DrawTextW(hdc,ql.c_str(),-1,&qRc,DT_LEFT|DT_SINGLELINE|DT_END_ELLIPSIS);
         }
         y+=16; hline(y,RGB(180,180,195)); y+=5;
@@ -1839,7 +1839,7 @@ static void DrawMCQResult(HDC hdc, const RECT& rc, const OverlaySnapshot& view){
     if(maxScroll>0&&y>=23&&y<rc.bottom-14){
         SetTextColor(hdc,RGB(110,110,90));
         RECT sh={6,y,rightEdge,y+13};
-        DrawTextW(hdc,L" \u2191\u2193 scroll",-1,&sh,DT_LEFT|DT_SINGLELINE);
+        DrawTextW(hdc,L"\u2191\u2193 scroll",-1,&sh,DT_LEFT|DT_SINGLELINE);
     }
 
     // Remove clip
@@ -1852,7 +1852,7 @@ static void DrawMCQResult(HDC hdc, const RECT& rc, const OverlaySnapshot& view){
         FillRect(hdc,&footBg,foot); DeleteObject(foot);
         SetTextColor(hdc,RGB(120,120,100));
         RECT sRc={5,rc.bottom-13,rightEdge,rc.bottom-1};
-        DrawTextW(hdc,(L" "+AtoW(view.log.c_str())).c_str(),-1,&sRc,DT_LEFT|DT_SINGLELINE|DT_END_ELLIPSIS);
+        DrawTextW(hdc,AtoW(view.log.c_str()).c_str(),-1,&sRc,DT_LEFT|DT_SINGLELINE|DT_END_ELLIPSIS);
     }
     SelectObject(hdc,ofc); DeleteObject(fnt);
 }
@@ -1904,7 +1904,7 @@ static void DrawAnswer(HDC hdc, const RECT& rc,const OverlaySnapshot& view){
         HFONT of=(HFONT)SelectObject(hdc,fntB);
         SetTextColor(hdc, stOn?RGB(0,140,50):RGB(30,90,210));
         wchar_t title[100]={};
-        swprintf_s(title,100,L"  AI Answer | %s | %d/%d (%d%%) | F7=Hide",
+        swprintf_s(title,100,L"AI Answer | %s | %d/%d (%d%%) | F7=Hide",
             SUBJECTS[view.subject],idx,total,pct);
         RECT tRc={4,4,rightEdge,20};
         DrawTextW(hdc,title,-1,&tRc,DT_LEFT|DT_SINGLELINE|DT_END_ELLIPSIS);
@@ -1936,7 +1936,7 @@ static void DrawAnswer(HDC hdc, const RECT& rc,const OverlaySnapshot& view){
         for(size_t li=0; li<ansLines.size(); li++){
             if(y+LINE_H>HEADER_H && y<(int)rc.bottom-FOOTER_H){
                 RECT lRc={6,y,rightEdge,y+LINE_H};
-                DrawTextW(hdc,(L" "+ansLines[li]).c_str(),-1,&lRc,DT_LEFT|DT_SINGLELINE|DT_END_ELLIPSIS);
+                DrawTextW(hdc,ansLines[li].c_str(),-1,&lRc,DT_LEFT|DT_SINGLELINE|DT_END_ELLIPSIS);
             }
             y+=LINE_H;
         }
@@ -1949,7 +1949,7 @@ static void DrawAnswer(HDC hdc, const RECT& rc,const OverlaySnapshot& view){
             FillRect(hdc,&hintR,hintBg); DeleteObject(hintBg);
             SetTextColor(hdc,RGB(100,100,130));
             RECT hRc={6,hintY,rightEdge,hintY+13};
-            DrawTextW(hdc,L" \u2191\u2193 mouse wheel to scroll",-1,&hRc,DT_LEFT|DT_SINGLELINE);
+            DrawTextW(hdc,L"\u2191\u2193 mouse wheel to scroll",-1,&hRc,DT_LEFT|DT_SINGLELINE);
         }
 
         SelectObject(hdc,ofc); DeleteObject(fntC);
@@ -1976,14 +1976,14 @@ static void DrawAnswer(HDC hdc, const RECT& rc,const OverlaySnapshot& view){
             FillRect(hdc,&bf,bf2); DeleteObject(bf2);
         }
         SetTextColor(hdc,RGB(30,30,30));
-        wchar_t prog[70]={}; swprintf_s(prog,70,L" Buffer: %d/%d (%d%%) | %s",
+        wchar_t prog[70]={}; swprintf_s(prog,70,L"Buffer: %d/%d (%d%%) | %s",
             idx,total,pct,stOn?L"STEALTH ON":L"STEALTH OFF");
         DrawTextW(hdc,prog,-1,&barbg,DT_LEFT|DT_SINGLELINE|DT_VCENTER);
 
         // Log line
         SetTextColor(hdc,RGB(80,80,100));
         RECT sRc={6,barBot+3,(int)rc.right-6,(int)rc.bottom-2};
-        DrawTextW(hdc,(L" "+AtoW(view.log.c_str())).c_str(),-1,&sRc,DT_LEFT|DT_SINGLELINE|DT_END_ELLIPSIS);
+        DrawTextW(hdc,AtoW(view.log.c_str()).c_str(),-1,&sRc,DT_LEFT|DT_SINGLELINE|DT_END_ELLIPSIS);
 
         SelectObject(hdc,ofs); DeleteObject(fntS);
     }

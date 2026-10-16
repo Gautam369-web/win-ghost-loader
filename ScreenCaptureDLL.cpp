@@ -1238,6 +1238,7 @@ static std::string CleanMCQText(const std::string& raw){
 static std::wstring g_mcqOptions[5];    // parsed option texts A-E (protected by g_stateMutex)
 static int          g_mcqOptCount = 4;  // 4 or 5 options found
 static int          g_mcqScrollY  = 0;  // scroll offset for MCQ overlay (pixels)
+static int          g_ansScrollY  = 0;  // scroll offset for code answer overlay
 
 // ── ParseMCQOptions: extract option text for A-E from MCQ text ─────────────
 // Recognises: "A) text"  "A. text"  "(A) text"  "(A.) text"
@@ -1475,6 +1476,7 @@ static void SetAnswer(const std::wstring& answer,bool typeable){
     g_answerDisplay = answer;
     g_displaySubject=t_subject;
     if(typeable){g_mcqLetter=0;for(int _i=0;_i<5;_i++) g_mcqOptions[_i].clear();g_mcqOptCount=4;g_mcqScrollY=0;}  // clear MCQ state
+    g_ansScrollY=0;  // reset answer scroll on new result
     LoadIntoBuffer(typeable?answer:std::wstring{});
     g_overlayMode   = 1;
     }
@@ -1500,6 +1502,7 @@ struct OverlaySnapshot {
     std::wstring mcqOptions[5]; // option texts A-E
     int          mcqOptCount;   // 4 or 5
     int          mcqScrollY;    // scroll offset
+    int          ansScrollY;    // scroll offset for code answer
 };
 static OverlaySnapshot SnapshotOverlay(){
     StateLock lock(g_stateMutex);
@@ -1523,6 +1526,7 @@ static OverlaySnapshot SnapshotOverlay(){
     for(int _i=0;_i<5;_i++) s.mcqOptions[_i]=g_mcqOptions[_i];
     s.mcqOptCount = g_mcqOptCount;
     s.mcqScrollY  = g_mcqScrollY;
+    s.ansScrollY  = g_ansScrollY;
     return s;
 }
 
@@ -1859,80 +1863,130 @@ static void DrawAnswer(HDC hdc, const RECT& rc,const OverlaySnapshot& view){
     int pct=total>0?(int)(idx*100/total):0;
     bool stOn=view.typing;
 
-    // Title
-    HFONT fntB=CreateFontW(-12,0,0,0,FW_BOLD,0,0,0,DEFAULT_CHARSET,0,0,CLEARTYPE_QUALITY,FIXED_PITCH,L"Consolas");
-    HFONT of=(HFONT)SelectObject(hdc,fntB);
-    SetTextColor(hdc, stOn?RGB(0,220,80):RGB(80,140,255));
-    wchar_t title[96]={};
-    swprintf_s(title,96,L"  AI Answer | %s | %d/%d (%d%%) | F7=Hide",
-        SUBJECTS[view.subject],idx,total,pct);
-    RECT tRc={6,4,rc.right-6,20};
-    DrawTextW(hdc,title,-1,&tRc,DT_LEFT|DT_SINGLELINE|DT_END_ELLIPSIS);
-    SelectObject(hdc,of); DeleteObject(fntB);
-
-    // Sep
-    auto hline=[&](int y, COLORREF c){
-        HPEN p=CreatePen(PS_SOLID,1,c);HPEN op=(HPEN)SelectObject(hdc,p);
-        MoveToEx(hdc,4,y,NULL);LineTo(hdc,rc.right-4,y);
-        SelectObject(hdc,op);DeleteObject(p);};
-    hline(22,RGB(40,44,58));
-
-    // Answer lines (code font)
-    HFONT fntC=CreateFontW(-12,0,0,0,FW_NORMAL,0,0,0,DEFAULT_CHARSET,0,0,CLEARTYPE_QUALITY,FIXED_PITCH,L"Consolas");
-    HFONT ofc=(HFONT)SelectObject(hdc,fntC);
-    SetTextColor(hdc, RGB(215,235,215));
-
-    const int MAX_LINES=9, LINE_H=14;
-    int y=26; size_t pos=0; int linesDone=0;
+    // Split the answer into lines
+    std::vector<std::wstring> ansLines;
     const std::wstring& ans=view.answer;
-
+    size_t pos=0;
     // skip leading blank lines
     while(pos<ans.size()&&(ans[pos]==L'\n'||ans[pos]==L'\r')) pos++;
-
-    while(pos<ans.size()&&linesDone<MAX_LINES){
+    while(pos<=ans.size()){
         size_t nl=ans.find(L'\n',pos);
         std::wstring line=(nl==std::wstring::npos)?ans.substr(pos):ans.substr(pos,nl-pos);
-        pos=(nl==std::wstring::npos)?ans.size():nl+1;
-        if(!line.empty()&&!line.compare(line.size()-1,1,L"\r")) line.pop_back();
-        RECT lRc={6,y,rc.right-6,y+LINE_H};
-        DrawTextW(hdc,(L" "+line).c_str(),-1,&lRc,DT_LEFT|DT_SINGLELINE|DT_END_ELLIPSIS);
-        y+=LINE_H; linesDone++;
+        if(!line.empty()&&line.back()==L'\r') line.pop_back();
+        ansLines.push_back(line);
+        if(nl==std::wstring::npos) break;
+        pos=nl+1;
     }
-    // remaining lines count
-    if(pos<ans.size()){
-        int extra=1; for(size_t i=pos;i<ans.size();i++) if(ans[i]==L'\n') extra++;
-        SetTextColor(hdc,RGB(90,90,110));
-        wchar_t more[32]; swprintf_s(more,32,L" ... +%d more lines",extra);
-        RECT mRc={6,y,rc.right-6,y+LINE_H};
-        DrawTextW(hdc,more,-1,&mRc,DT_LEFT|DT_SINGLELINE);
+
+    // Layout constants
+    const int HEADER_H = 23;   // frozen title area height
+    const int FOOTER_H = 54;   // frozen footer: progress bar + log
+    const int LINE_H   = 15;
+    const int PAD      = 2;
+    int visH = (int)rc.bottom - HEADER_H - FOOTER_H;   // scrollable viewport height
+    int contentH = (int)ansLines.size() * LINE_H + PAD*2;
+    int maxScroll = std::max(0, contentH - visH);
+    int scrollY   = std::min(view.ansScrollY, maxScroll);
+    int rightEdge = maxScroll>0 ? (int)rc.right-6 : (int)rc.right-4;
+
+    // helper
+    auto hline=[&](int y, COLORREF c){
+        HPEN p=CreatePen(PS_SOLID,1,c);HPEN op=(HPEN)SelectObject(hdc,p);
+        MoveToEx(hdc,4,y,NULL);LineTo(hdc,rightEdge,y);
+        SelectObject(hdc,op);DeleteObject(p);};
+
+    // ── Frozen header ────────────────────────────────────────────────────
+    {
+        // Clear header strip
+        HBRUSH hb=CreateSolidBrush(RGB(11,13,18));
+        RECT hR={0,0,(int)rc.right,HEADER_H}; FillRect(hdc,&hR,hb); DeleteObject(hb);
+        HFONT fntB=CreateFontW(-12,0,0,0,FW_BOLD,0,0,0,DEFAULT_CHARSET,0,0,CLEARTYPE_QUALITY,FIXED_PITCH,L"Consolas");
+        HFONT of=(HFONT)SelectObject(hdc,fntB);
+        SetTextColor(hdc, stOn?RGB(0,220,80):RGB(80,140,255));
+        wchar_t title[100]={};
+        swprintf_s(title,100,L"  AI Answer | %s | %d/%d (%d%%) | F7=Hide",
+            SUBJECTS[view.subject],idx,total,pct);
+        RECT tRc={4,4,rightEdge,20};
+        DrawTextW(hdc,title,-1,&tRc,DT_LEFT|DT_SINGLELINE|DT_END_ELLIPSIS);
+        SelectObject(hdc,of); DeleteObject(fntB);
+        hline(HEADER_H-1,RGB(40,44,58));
     }
-    SelectObject(hdc,ofc); DeleteObject(fntC);
 
-    // Bottom separator
-    hline(rc.bottom-36,RGB(40,44,58));
-
-    // Progress bar
-    HFONT fntS=CreateFontW(-11,0,0,0,FW_NORMAL,0,0,0,DEFAULT_CHARSET,0,0,DEFAULT_QUALITY,FIXED_PITCH,L"Consolas");
-    HFONT ofs=(HFONT)SelectObject(hdc,fntS);
-    RECT barbg={6,rc.bottom-34,rc.right-6,rc.bottom-22};
-    HBRUSH bb=CreateSolidBrush(RGB(28,30,40)); FillRect(hdc,&barbg,bb); DeleteObject(bb);
-    if(total>0){
-        int fw=(int)((rc.right-12)*(long long)idx/total);
-        RECT bf={6,rc.bottom-34,6+fw,rc.bottom-22};
-        HBRUSH bf2=CreateSolidBrush(stOn?RGB(0,140,60):RGB(50,100,200));
-        FillRect(hdc,&bf,bf2); DeleteObject(bf2);
+    // ── Scrollbar ────────────────────────────────────────────────────────
+    if(maxScroll>0){
+        RECT sbBg={(int)rc.right-5,HEADER_H,(int)rc.right-1,(int)rc.bottom-FOOTER_H};
+        HBRUSH sbBr=CreateSolidBrush(RGB(22,22,28)); FillRect(hdc,&sbBg,sbBr); DeleteObject(sbBr);
+        int sbH=(int)rc.bottom-FOOTER_H-HEADER_H;
+        int thumbH=std::max(12,(int)(sbH*visH/std::max(1,contentH)));
+        int thumbY=HEADER_H+(int)((sbH-thumbH)*scrollY/std::max(1,maxScroll));
+        RECT sbTh={(int)rc.right-5,thumbY,(int)rc.right-1,thumbY+thumbH};
+        HBRUSH th=CreateSolidBrush(stOn?RGB(0,120,50):RGB(60,100,200)); FillRect(hdc,&sbTh,th); DeleteObject(th);
     }
-    SetTextColor(hdc,RGB(210,210,210));
-    wchar_t prog[60]={}; swprintf_s(prog,60,L" Buffer: %d/%d (%d%%) | %s",
-        idx,total,pct,stOn?L"STEALTH ON":L"STEALTH OFF");
-    DrawTextW(hdc,prog,-1,&barbg,DT_LEFT|DT_SINGLELINE|DT_VCENTER);
 
-    // Status/log
-    SetTextColor(hdc,RGB(120,120,140));
-    RECT sRc={6,rc.bottom-20,rc.right-6,rc.bottom-4};
-    DrawTextW(hdc,(L" "+AtoW(view.log.c_str())).c_str(),-1,&sRc,DT_LEFT|DT_SINGLELINE|DT_END_ELLIPSIS);
+    // ── Scrollable content area (clipped) ────────────────────────────────
+    {
+        HRGN clip=CreateRectRgn(0,HEADER_H,(int)rc.right,(int)rc.bottom-FOOTER_H);
+        SelectClipRgn(hdc,clip);
 
-    SelectObject(hdc,ofs); DeleteObject(fntS);
+        HFONT fntC=CreateFontW(-12,0,0,0,FW_NORMAL,0,0,0,DEFAULT_CHARSET,0,0,CLEARTYPE_QUALITY,FIXED_PITCH,L"Consolas");
+        HFONT ofc=(HFONT)SelectObject(hdc,fntC);
+        SetTextColor(hdc, RGB(215,235,215));
+
+        int y = HEADER_H + PAD - scrollY;
+        for(size_t li=0; li<ansLines.size(); li++){
+            if(y+LINE_H>HEADER_H && y<(int)rc.bottom-FOOTER_H){
+                RECT lRc={6,y,rightEdge,y+LINE_H};
+                DrawTextW(hdc,(L" "+ansLines[li]).c_str(),-1,&lRc,DT_LEFT|DT_SINGLELINE|DT_END_ELLIPSIS);
+            }
+            y+=LINE_H;
+        }
+
+        // Scroll hint at bottom of content (when scrollable)
+        if(maxScroll>0){
+            int hintY=(int)rc.bottom-FOOTER_H-14;
+            HBRUSH hintBg=CreateSolidBrush(RGB(11,13,18));
+            RECT hintR={0,hintY,(int)rc.right,(int)rc.bottom-FOOTER_H};
+            FillRect(hdc,&hintR,hintBg); DeleteObject(hintBg);
+            SetTextColor(hdc,RGB(55,60,85));
+            RECT hRc={6,hintY,rightEdge,hintY+13};
+            DrawTextW(hdc,L" \u2191\u2193 mouse wheel to scroll",-1,&hRc,DT_LEFT|DT_SINGLELINE);
+        }
+
+        SelectObject(hdc,ofc); DeleteObject(fntC);
+        SelectClipRgn(hdc,NULL); DeleteObject(clip);
+    }
+
+    // ── Frozen footer: separator + progress bar + log ────────────────────
+    {
+        int footTop=(int)rc.bottom-FOOTER_H;
+        HBRUSH fb=CreateSolidBrush(RGB(11,13,18));
+        RECT fR={0,footTop,(int)rc.right,(int)rc.bottom}; FillRect(hdc,&fR,fb); DeleteObject(fb);
+        hline(footTop+1,RGB(40,44,58));
+
+        // Progress bar
+        HFONT fntS=CreateFontW(-11,0,0,0,FW_NORMAL,0,0,0,DEFAULT_CHARSET,0,0,DEFAULT_QUALITY,FIXED_PITCH,L"Consolas");
+        HFONT ofs=(HFONT)SelectObject(hdc,fntS);
+        int barTop=footTop+4, barBot=barTop+14;
+        RECT barbg={6,barTop,(int)rc.right-6,barBot};
+        HBRUSH bb=CreateSolidBrush(RGB(22,24,34)); FillRect(hdc,&barbg,bb); DeleteObject(bb);
+        if(total>0){
+            int fw=(int)((rc.right-12)*(long long)idx/total);
+            RECT bf={6,barTop,6+fw,barBot};
+            HBRUSH bf2=CreateSolidBrush(stOn?RGB(0,140,60):RGB(50,100,200));
+            FillRect(hdc,&bf,bf2); DeleteObject(bf2);
+        }
+        SetTextColor(hdc,RGB(210,210,210));
+        wchar_t prog[70]={}; swprintf_s(prog,70,L" Buffer: %d/%d (%d%%) | %s",
+            idx,total,pct,stOn?L"STEALTH ON":L"STEALTH OFF");
+        DrawTextW(hdc,prog,-1,&barbg,DT_LEFT|DT_SINGLELINE|DT_VCENTER);
+
+        // Log line
+        SetTextColor(hdc,RGB(110,110,130));
+        RECT sRc={6,barBot+3,(int)rc.right-6,(int)rc.bottom-2};
+        DrawTextW(hdc,(L" "+AtoW(view.log.c_str())).c_str(),-1,&sRc,DT_LEFT|DT_SINGLELINE|DT_END_ELLIPSIS);
+
+        SelectObject(hdc,ofs); DeleteObject(fntS);
+    }
 }
 
 // ── Main overlay paint ─────────────────────────────────────────────────────
@@ -1994,8 +2048,14 @@ static LRESULT CALLBACK OvlWndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp){
 
     case WM_MOUSEWHEEL:{
         int delta=GET_WHEEL_DELTA_WPARAM(wp);
+        int step=(delta/WHEEL_DELTA)*20;  // 20px per notch
         { StateLock lock(g_stateMutex);
-          g_mcqScrollY=std::max(0,g_mcqScrollY-(delta/WHEEL_DELTA)*22); }
+          int mode=g_overlayMode.load();
+          if(mode==1&&g_mcqLetter!=0)
+              g_mcqScrollY=std::max(0,g_mcqScrollY-step);
+          else if(mode==1)
+              g_ansScrollY=std::max(0,g_ansScrollY-step);
+        }
         InvalidateRect(hwnd,nullptr,FALSE); return 0;
     }
     case WM_LBUTTONDOWN: ReleaseCapture();SendMessageW(hwnd,WM_NCLBUTTONDOWN,HTCAPTION,0);return 0;

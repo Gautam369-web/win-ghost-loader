@@ -1555,7 +1555,7 @@ static void DrawProcessing(HDC hdc, const RECT& rc,const OverlaySnapshot& view){
         HPEN p=CreatePen(PS_SOLID,1,c);HPEN op=(HPEN)SelectObject(hdc,p);
         MoveToEx(hdc,4,y,NULL);LineTo(hdc,rc.right-4,y);
         SelectObject(hdc,op);DeleteObject(p);};
-    hline(22,RGB(80,70,20));
+    hline(22,RGB(180,180,195));
 
     HFONT fnt=CreateFontW(-13,0,0,0,FW_NORMAL,0,0,0,DEFAULT_CHARSET,0,0,CLEARTYPE_QUALITY,FIXED_PITCH,L"Consolas");
     HFONT ofc=(HFONT)SelectObject(hdc,fnt);
@@ -1607,7 +1607,7 @@ static void DrawProcessing(HDC hdc, const RECT& rc,const OverlaySnapshot& view){
             RECT bRc={rc.right-74,y,rc.right-6,y+17};
             DrawTextW(hdc,L"[ WORKING ]",-1,&bRc,DT_RIGHT|DT_SINGLELINE);
         } else {
-            SetTextColor(hdc,RGB(55,55,70));
+            SetTextColor(hdc,RGB(120,120,140));
             RECT bRc={rc.right-66,y,rc.right-6,y+17};
             DrawTextW(hdc,L"[ WAIT ]",-1,&bRc,DT_RIGHT|DT_SINGLELINE);
         }

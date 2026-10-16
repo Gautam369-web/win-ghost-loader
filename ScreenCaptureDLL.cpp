@@ -1194,20 +1194,57 @@ static void MoveMCQMouse(char letter){
 }
 
 static char ParseMCQLetter(const std::string& text){return sc::McqLetter(text);}
+
+// MCQ result state (protected by g_stateMutex)
+static char         g_mcqLetter   = 0;     // 0 = not MCQ result; 'A'-'D' when done
+static std::wstring g_mcqQuestion;          // truncated question snippet for display
+static std::wstring g_mcqCorner;            // e.g. L"TOP-LEFT"
+
 static DWORD WINAPI MCQExtractThread(LPVOID){
     if(RequestCancelled())return 0;
     t_mcqRequest=true;
-    t_debug="F9 | MCQ extraction";t_extractedBytes=0;
+    t_debug="F9 | MCQ extraction"; t_extractedBytes=0;
+
+    // Clear any previous MCQ result globals before starting
+    { StateLock lk(g_stateMutex);
+      g_mcqLetter=0; g_mcqQuestion.clear(); g_mcqCorner.clear(); }
+
+    // ── Step 1: Reading question text ─────────────────────────────
+    SetLog("MCQ: Reading question text from screen...");
     SetProcessing(3,false,false);
     std::string question=ExtractRequestText();
-    t_extractedBytes=question.size();t_debug+="\nExtracted bytes: "+std::to_string(t_extractedBytes);
+    t_extractedBytes=question.size();
+    t_debug+="\nExtracted bytes: "+std::to_string(t_extractedBytes);
+
     if(RequestCancelled())return 0;
-    if(question.empty()){PublishFailure("No accessible question text. Point at the question and options, then retry.");return 0;}
+    if(question.empty()){
+        PublishFailure("No accessible question text. Point at the question and options, then retry.");
+        return 0;
+    }
+
+    // Store truncated question snippet (first 80 chars, single-line) for overlay
+    { std::string snippet=question.substr(0,std::min((size_t)80,question.size()));
+      for(char& c:snippet) if(c=='\n'||c=='\r'||c=='\t') c=' ';
+      StateLock lk(g_stateMutex);
+      g_mcqQuestion=FromUtf8(snippet);
+    }
+    SetLog(("MCQ: "+std::to_string(t_extractedBytes)+" bytes read. Analyzing question...").c_str());
+
+    // ── Step 2: Asking Gemini AI ────────────────────────────────────
     SetProcessing(3,true,false);
-    std::string prompt="Review this multiple-choice question. If the question or its options are missing or ambiguous, reply UNKNOWN. Otherwise reply ONLY one letter A, B, C, or D.\n\nQuestion and options:\n"+question;
+    SetLog("MCQ: Sending to Gemini AI for analysis...");
+
+    std::string prompt=
+        "You are solving a multiple-choice question (MCQ). "
+        "Read the question and all options carefully, then identify the correct answer. "
+        "If the question or its options are missing or ambiguous, reply exactly: UNKNOWN\n"
+        "Otherwise reply ONLY a single uppercase letter: A, B, C, or D -- nothing else.\n\n"
+        "Question and options:\n"+question;
     std::string answer=CallGemini(prompt);
+
     if(RequestCancelled())return 0;
     if(answer.empty()){PublishFailure(t_aiError.c_str());return 0;}
+
     char letter=ParseMCQLetter(answer);
     if(!letter){
         PublishFailure(TrimStr(answer)=="UNKNOWN"?
@@ -1215,11 +1252,30 @@ static DWORD WINAPI MCQExtractThread(LPVOID){
             "AI returned an unexpected MCQ format (expected A-D). No option selected. Retry the full question.");
         return 0;
     }
-    std::string display=std::string("Suggested option: ")+letter+"\n\nMouse moving to corner: "+letter;
-    if(answer.empty()&&!t_aiError.empty())display+="\n"+t_aiError;
-    SetAnswer(FromUtf8(display),false);
-    if(!RequestCancelled())SaveMCQFile("QUESTION:\n"+question+"\n\n"+display);
-    SetLog((std::string("MCQ option ")+letter+" ready; moving mouse.").c_str());
+
+    // ── Step 3: Prepare result and show overlay ─────────────────────────
+    // Z-pattern corners: A=top-left B=top-right C=bottom-left D=bottom-right
+    static const wchar_t* CORNERS[]={L"TOP-LEFT",L"TOP-RIGHT",L"BOTTOM-LEFT",L"BOTTOM-RIGHT"};
+    int ci = letter-'A';
+    std::wstring cornerW = (ci>=0&&ci<4) ? CORNERS[ci] : L"UNKNOWN";
+
+    { StateLock lk(g_stateMutex);
+      g_mcqLetter = letter;
+      g_mcqCorner = cornerW;
+    }
+    SetLog(("MCQ: AI answered option "+std::string(1,letter)
+           +" ("+std::string(cornerW.begin(),cornerW.end())+"). Displaying...").c_str());
+
+    std::wstring display = std::wstring(L"MCQ Answer: ") + (wchar_t)letter
+                         + L"\n\nMoving mouse to: " + cornerW + L" corner";
+    SetAnswer(display,false);
+
+    if(!RequestCancelled())
+        SaveMCQFile("QUESTION:\n"+question+"\n\nAnswer: "+letter
+                   +"\nCorner: "+std::string(cornerW.begin(),cornerW.end()));
+
+    SetLog(("MCQ option "+std::string(1,letter)+" shown. Mouse moving to "
+           +std::string(cornerW.begin(),cornerW.end())+".").c_str());
     MoveMCQMouse(letter);
     return 0;
 }
@@ -1268,6 +1324,7 @@ static void SetAnswer(const std::wstring& answer,bool typeable){
     g_histIdx = (int)g_answerHistory.size()-1;
     g_answerDisplay = answer;
     g_displaySubject=t_subject;
+    if(typeable) g_mcqLetter=0;  // clear MCQ result when loading typeable answer
     LoadIntoBuffer(typeable?answer:std::wstring{});
     g_overlayMode   = 1;
     }
@@ -1287,13 +1344,32 @@ static void PublishFailure(const char* message){
 struct OverlaySnapshot {
     int mode,subject,step,spin;LONG index;size_t total;bool typing,verified,step1,step2;
     std::wstring answer;std::string log,status;
+    char         mcqLetter;       // 0 or 'A'-'D'
+    std::wstring mcqQuestion;     // truncated question snippet
+    std::wstring mcqCorner;       // e.g. L"TOP-LEFT"
 };
 static OverlaySnapshot SnapshotOverlay(){
     StateLock lock(g_stateMutex);
-    return {g_overlayMode.load(),g_overlayMode==1?g_displaySubject:g_subjectIdx.load(),g_procStep,g_spinTick,
-        g_bufIdx,g_buf.size(),g_stealthOn!=0,g_verified.load(),g_step1Done,g_step2Done,
-        g_answerDisplay,g_lastLog,g_verifyStatus};
+    OverlaySnapshot s;
+    s.mode     = g_overlayMode.load();
+    s.subject  = (s.mode==1) ? g_displaySubject : g_subjectIdx.load();
+    s.step     = g_procStep;
+    s.spin     = g_spinTick;
+    s.index    = g_bufIdx;
+    s.total    = g_buf.size();
+    s.typing   = (g_stealthOn != 0);
+    s.verified = g_verified.load();
+    s.step1    = g_step1Done;
+    s.step2    = g_step2Done;
+    s.answer   = g_answerDisplay;
+    s.log      = g_lastLog;
+    s.status   = g_verifyStatus;
+    s.mcqLetter   = g_mcqLetter;
+    s.mcqQuestion = g_mcqQuestion;
+    s.mcqCorner   = g_mcqCorner;
+    return s;
 }
+
 
 static void DrawProcessing(HDC hdc, const RECT& rc,const OverlaySnapshot& view){
     const wchar_t* spinner[]={L"⠋",L"⠙",L"⠹",L"⠸",L"⠼",L"⠴",L"⠦",L"⠧",L"⠇",L"⠏"};
@@ -1338,9 +1414,9 @@ static void DrawProcessing(HDC hdc, const RECT& rc,const OverlaySnapshot& view){
         steps[1] = {L"Sending to Gemini AI...",       view.step2, (!view.step2 && view.step>=2)};
         steps[2] = {L"Loading answer into buffer",    (view.step==0&&view.step2), false};
     } else {
-        steps[0] = {L"Scanning MCQ options",          view.step1, (!view.step1 && view.step>=1)};
-        steps[1] = {L"Reviewing question with AI",     view.step2, (!view.step2 && view.step>=2)};
-        steps[2] = {L"Review suggestion manually",false,       false};
+        steps[0] = {L"Reading question text",  view.step1, (!view.step1 && view.step>=1)};
+        steps[1] = {L"Gemini AI analyzing...", view.step2, (!view.step2 && view.step>=2)};
+        steps[2] = {L"Result ready \u2192 check overlay", (view.mode==1), false};
     }
 
     int y = 34;
@@ -1376,6 +1452,17 @@ static void DrawProcessing(HDC hdc, const RECT& rc,const OverlaySnapshot& view){
             DrawTextW(hdc,L"[ WAIT ]",-1,&bRc,DT_RIGHT|DT_SINGLELINE);
         }
         y+=20;
+    }
+
+    // ── MCQ question snippet (shown during MCQ processing) ─────────────────
+    if(isMCQ && !view.mcqQuestion.empty()){
+        SetTextColor(hdc,RGB(150,150,100));
+        RECT qRc={6,y+2,rc.right-6,y+16};
+        std::wstring qSnip=L"\u00ab "+view.mcqQuestion;
+        if(qSnip.size()>45) qSnip=qSnip.substr(0,44)+L"\u2026\u00bb";
+        else qSnip+=L" \u00bb";
+        DrawTextW(hdc,qSnip.c_str(),-1,&qRc,DT_LEFT|DT_SINGLELINE|DT_END_ELLIPSIS);
+        y+=18;
     }
 
     // ── Separator + status bar ─────────────────────────────────────────────
@@ -1454,6 +1541,89 @@ static void DrawShortcuts(HDC hdc, const RECT& rc,const OverlaySnapshot& view){
     DrawTextW(hdc,st,-1,&sRc,DT_LEFT|DT_SINGLELINE|DT_END_ELLIPSIS);
 
     SelectObject(hdc,of); DeleteObject(fnt);
+}
+
+// ── Draw mode 1 (MCQ variant): Dedicated MCQ Result display ─────────────────
+static void DrawMCQResult(HDC hdc, const RECT& rc, const OverlaySnapshot& view){
+    auto hline=[&](int y, COLORREF c){
+        HPEN p=CreatePen(PS_SOLID,1,c);HPEN op=(HPEN)SelectObject(hdc,p);
+        MoveToEx(hdc,4,y,NULL);LineTo(hdc,rc.right-4,y);
+        SelectObject(hdc,op);DeleteObject(p);};
+
+    // ── Title ────────────────────────────────────────────────────────
+    HFONT fntB=CreateFontW(-13,0,0,0,FW_BOLD,0,0,0,DEFAULT_CHARSET,0,0,CLEARTYPE_QUALITY,FIXED_PITCH,L"Consolas");
+    HFONT of=(HFONT)SelectObject(hdc,fntB);
+    SetTextColor(hdc, RGB(255,210,60));
+    RECT tRc={6,4,rc.right-6,20};
+    DrawTextW(hdc,L"  \u2726 MCQ RESULT  |  F7=Hide",-1,&tRc,DT_LEFT|DT_SINGLELINE|DT_END_ELLIPSIS);
+    SelectObject(hdc,of); DeleteObject(fntB);
+    hline(22,RGB(80,65,15));
+
+    HFONT fnt=CreateFontW(-12,0,0,0,FW_NORMAL,0,0,0,DEFAULT_CHARSET,0,0,CLEARTYPE_QUALITY,FIXED_PITCH,L"Consolas");
+    HFONT ofc=(HFONT)SelectObject(hdc,fnt);
+
+    int y=28;
+
+    // ── Question snippet ───────────────────────────────────────────────
+    if(!view.mcqQuestion.empty()){
+        SetTextColor(hdc, RGB(155,155,115));
+        RECT qRc={6,y,rc.right-6,y+14};
+        std::wstring qLabel=L" Q: "+view.mcqQuestion;
+        DrawTextW(hdc,qLabel.c_str(),-1,&qRc,DT_LEFT|DT_SINGLELINE|DT_END_ELLIPSIS);
+        y+=16; hline(y,RGB(45,42,20)); y+=5;
+    }
+
+    // ── Options A-D ──────────────────────────────────────────────────
+    char correct=view.mcqLetter;
+    static const wchar_t* OPT_CORNERS[]={L"TOP-LEFT",L"TOP-RIGHT",L"BOT-LEFT",L"BOT-RIGHT"};
+    for(int i=0;i<4;i++){
+        char thisOpt=(char)('A'+i);
+        bool isCorrect=(thisOpt==correct);
+        if(isCorrect){
+            RECT hiRc={4,y-1,rc.right-4,y+15};
+            HBRUSH hiBr=CreateSolidBrush(RGB(8,45,12));
+            FillRect(hdc,&hiRc,hiBr); DeleteObject(hiBr);
+        }
+        // bullet
+        SetTextColor(hdc, isCorrect?RGB(0,230,80):RGB(55,55,75));
+        RECT bRc={6,y,20,y+14}; DrawTextW(hdc,isCorrect?L"\u25CF":L"\u25CB",-1,&bRc,DT_CENTER|DT_SINGLELINE);
+        // option letter
+        SetTextColor(hdc, isCorrect?RGB(60,255,100):RGB(70,70,90));
+        RECT lRc={20,y,36,y+14};
+        wchar_t lbuf[4]={}; swprintf_s(lbuf,4,L"%c:",thisOpt);
+        DrawTextW(hdc,lbuf,-1,&lRc,DT_LEFT|DT_SINGLELINE);
+        if(isCorrect){
+            // corner badge on right
+            SetTextColor(hdc,RGB(255,220,50));
+            wchar_t cbuf[20]={}; swprintf_s(cbuf,20,L"[%s]",OPT_CORNERS[i]);
+            RECT cRc={rc.right-100,y,rc.right-4,y+14}; DrawTextW(hdc,cbuf,-1,&cRc,DT_RIGHT|DT_SINGLELINE);
+            // correct label
+            SetTextColor(hdc,RGB(0,230,80));
+            RECT tRc2={36,y,rc.right-104,y+14};
+            DrawTextW(hdc,L"\u2190 CORRECT",-1,&tRc2,DT_LEFT|DT_SINGLELINE|DT_END_ELLIPSIS);
+        } else {
+            SetTextColor(hdc,RGB(45,45,60));
+            RECT tRc2={36,y,rc.right-6,y+14};
+            DrawTextW(hdc,L"\u2014",-1,&tRc2,DT_LEFT|DT_SINGLELINE);
+        }
+        y+=17;
+    }
+
+    hline(y+2,RGB(55,50,18)); y+=8;
+
+    // ── Corner destination row ───────────────────────────────────────
+    SetTextColor(hdc,RGB(255,200,50));
+    RECT mRc={6,y,rc.right-6,y+14};
+    std::wstring mouseMsg=L" \u2192 Mouse \u2192 "+view.mcqCorner+L" corner";
+    DrawTextW(hdc,mouseMsg.c_str(),-1,&mRc,DT_LEFT|DT_SINGLELINE|DT_END_ELLIPSIS);
+    y+=16;
+
+    // ── Log / status ──────────────────────────────────────────────
+    SetTextColor(hdc,RGB(70,70,55));
+    RECT sRc={6,y,rc.right-6,y+13};
+    DrawTextW(hdc,(L" "+AtoW(view.log.c_str())).c_str(),-1,&sRc,DT_LEFT|DT_SINGLELINE|DT_END_ELLIPSIS);
+
+    SelectObject(hdc,ofc); DeleteObject(fnt);
 }
 
 // ── Draw mode 1: AI Answer ─────────────────────────────────────────────────
@@ -1559,7 +1729,10 @@ static void DrawOverlay(HWND hwnd){
     SetBkMode(hdc,TRANSPARENT);
 
     if(view.mode==0)      DrawShortcuts(hdc,rc,view);
-    else if(view.mode==1) DrawAnswer(hdc,rc,view);
+    else if(view.mode==1){
+        if(view.mcqLetter) DrawMCQResult(hdc,rc,view);
+        else               DrawAnswer(hdc,rc,view);
+    }
     else if(view.mode==3){
         HFONT font=CreateFontW(-13,0,0,0,FW_NORMAL,0,0,0,DEFAULT_CHARSET,0,0,CLEARTYPE_QUALITY,FIXED_PITCH,L"Consolas");
         HFONT old=(HFONT)SelectObject(hdc,font);

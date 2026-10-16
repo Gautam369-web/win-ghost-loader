@@ -1000,24 +1000,27 @@ static bool InjectChar(wchar_t ch){
         inputs[i].ki.dwFlags=(vk?0:KEYEVENTF_UNICODE)|(i?KEYEVENTF_KEYUP:0);
     }
     if(SendInput(2,inputs,sizeof(INPUT))!=2) return false;
-    // After Enter: the editor auto-indents (adds spaces on the new line).
-    // Fix: End → Shift+Home (select all auto-indent) → Delete (erase it).
-    // Then the stealth typer types the original indentation from the buffer.
+    // After Enter: editor auto-indents (inserts spaces on the new line).
+    // Sequence: End (reach end of auto-indent) → Shift+Home (select it all
+    // back to col 0) → Delete (erase selection).  Done twice because some
+    // editors (e.g. CodeMirror / Python mode) send Home to first non-
+    // whitespace on the first press — second pass ensures col 0 is reached.
+    // Sleep(50) before: give editor time to finish auto-indenting.
+    // Sleep(40) after:  give editor time to process Delete before the stealth
+    //                   typer fires the next char (first space of next line).
     if(ch==L'\n'){
-        Sleep(25); // let editor finish applying auto-indent
+        Sleep(50);
         INPUT clr[8]={};
-        // End (move to end of auto-indented region, wherever cursor may be)
-        clr[0].type=INPUT_KEYBOARD; clr[0].ki.wVk=VK_END;   clr[0].ki.dwExtraInfo=STEALTH_MAGIC; clr[0].ki.dwFlags=0;
-        clr[1].type=INPUT_KEYBOARD; clr[1].ki.wVk=VK_END;   clr[1].ki.dwExtraInfo=STEALTH_MAGIC; clr[1].ki.dwFlags=KEYEVENTF_KEYUP;
-        // Shift+Home (select entire new-line content back to col 0)
-        clr[2].type=INPUT_KEYBOARD; clr[2].ki.wVk=VK_SHIFT; clr[2].ki.dwExtraInfo=STEALTH_MAGIC; clr[2].ki.dwFlags=0;
-        clr[3].type=INPUT_KEYBOARD; clr[3].ki.wVk=VK_HOME;  clr[3].ki.dwExtraInfo=STEALTH_MAGIC; clr[3].ki.dwFlags=0;
-        clr[4].type=INPUT_KEYBOARD; clr[4].ki.wVk=VK_HOME;  clr[4].ki.dwExtraInfo=STEALTH_MAGIC; clr[4].ki.dwFlags=KEYEVENTF_KEYUP;
-        clr[5].type=INPUT_KEYBOARD; clr[5].ki.wVk=VK_SHIFT; clr[5].ki.dwExtraInfo=STEALTH_MAGIC; clr[5].ki.dwFlags=KEYEVENTF_KEYUP;
-        // Delete (remove selection — a no-op if line was already empty)
+        clr[0].type=INPUT_KEYBOARD; clr[0].ki.wVk=VK_END;    clr[0].ki.dwExtraInfo=STEALTH_MAGIC; clr[0].ki.dwFlags=0;
+        clr[1].type=INPUT_KEYBOARD; clr[1].ki.wVk=VK_END;    clr[1].ki.dwExtraInfo=STEALTH_MAGIC; clr[1].ki.dwFlags=KEYEVENTF_KEYUP;
+        clr[2].type=INPUT_KEYBOARD; clr[2].ki.wVk=VK_SHIFT;  clr[2].ki.dwExtraInfo=STEALTH_MAGIC; clr[2].ki.dwFlags=0;
+        clr[3].type=INPUT_KEYBOARD; clr[3].ki.wVk=VK_HOME;   clr[3].ki.dwExtraInfo=STEALTH_MAGIC; clr[3].ki.dwFlags=0;
+        clr[4].type=INPUT_KEYBOARD; clr[4].ki.wVk=VK_HOME;   clr[4].ki.dwExtraInfo=STEALTH_MAGIC; clr[4].ki.dwFlags=KEYEVENTF_KEYUP;
+        clr[5].type=INPUT_KEYBOARD; clr[5].ki.wVk=VK_SHIFT;  clr[5].ki.dwExtraInfo=STEALTH_MAGIC; clr[5].ki.dwFlags=KEYEVENTF_KEYUP;
         clr[6].type=INPUT_KEYBOARD; clr[6].ki.wVk=VK_DELETE; clr[6].ki.dwExtraInfo=STEALTH_MAGIC; clr[6].ki.dwFlags=0;
         clr[7].type=INPUT_KEYBOARD; clr[7].ki.wVk=VK_DELETE; clr[7].ki.dwExtraInfo=STEALTH_MAGIC; clr[7].ki.dwFlags=KEYEVENTF_KEYUP;
         SendInput(8,clr,sizeof(INPUT));
+        Sleep(40); // let editor process Delete before next char fires
     }
     g_lastTyped=ch; return true;
 }

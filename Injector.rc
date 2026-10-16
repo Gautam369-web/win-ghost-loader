@@ -1,0 +1,3 @@
+// Resource file — embeds the UAC manifest into Injector.exe
+// Resource ID 1 = RT_MANIFEST
+1 24 "Injector.manifest"

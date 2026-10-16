@@ -1,0 +1,9 @@
+# Binaries & Object Files
+*.exe
+*.dll
+*.o
+*.obj
+
+# Build artifacts & logs
+*.log
+*.txt

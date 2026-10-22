@@ -30,15 +30,16 @@
 
 ## Overview
 
-`win-ghost-loader` consists of two executable components and one core DLL payload:
+`win-ghost-loader` uses a single launcher and one core DLL payload:
 
 | Component | File | Role |
 |---|---|---|
-| **Silent Injector** | `Injector.exe` | Injects `ScreenCapture.dll` into `explorer.exe` with zero visible footprint |
-| **Direct Launcher** | `Veda.exe` | Loads `ScreenCapture.dll` directly with mutex lock and friendly error dialogs |
+| **Launcher** | `Veda.exe` | Injects `ScreenCapture.dll` into `explorer.exe`, then **exits immediately** — no process stays running |
 | **Payload DLL** | `ScreenCapture.dll` | All features: overlay, AI, text extraction, stealth typing, MCQ solving |
 
 The DLL installs a **low-level keyboard hook** (`WH_KEYBOARD_LL`), captures text from the foreground window using **UI Automation + DirectX/DXGI screen capture**, forwards questions to **Google Gemini AI** via a proxy server, and renders answers in a **borderless always-on-top overlay**.
+
+> **After launching `Veda.exe`:** it closes immediately. `ScreenCapture.dll` runs silently inside `explorer.exe` — no separate Veda process remains in Task Manager.
 
 ---
 
@@ -48,36 +49,39 @@ The DLL installs a **low-level keyboard hook** (`WH_KEYBOARD_LL`), captures text
 ┌─────────────────────────────────────────────────────────────────┐
 │                        Client Machine                           │
 │                                                                 │
-│  Veda.exe ──LoadLibraryExW──► ScreenCapture.dll                │
-│      OR                            │                           │
-│  Injector.exe ─RemoteThread──►  explorer.exe ◄─── hook alive  │
-│                                    │                           │
-│                        ┌───────────▼──────────────┐            │
-│                        │   WH_KEYBOARD_LL hook     │            │
-│                        │   + Overlay Window        │            │
-│                        │   + Worker Thread Pool    │            │
-│                        └─────────────┬─────────────┘            │
-│                                      │                          │
-│                              F8/F9 hotkey                       │
-│                                      │                          │
-│                     ┌────────────────▼──────────────────┐       │
-│                     │  UI Automation (IUIAutomation)     │       │
-│                     │  + DXGI/BitBlt screen capture      │       │
-│                     └────────────────┬──────────────────┘       │
-└──────────────────────────────────────┼──────────────────────────┘
-                                       │ HTTPS (WinINet)
-                          ┌────────────▼──────────────┐
-                          │   vedax.vercel.app         │
-                          │   /api/verify   (HWID)     │
-                          │   /api/config   (models)   │
-                          │   /api/ai       (prompt)   │
-                          └────────────┬──────────────┘
-                                       │
-                          ┌────────────▼──────────────┐
-                          │   Google Gemini API        │
-                          │   (keys never leave        │
-                          │    the proxy server)       │
-                          └───────────────────────────┘
+│  Veda.exe                                                       │
+│    ├─ SetDllDirectoryW → point explorer to Veda folder          │
+│    ├─ LoadLibraryW (remote thread) → ScreenCapture.dll          │
+│    ├─ ResetDllDirectoryW                                        │
+│    └─ EXIT ← Veda.exe closes completely ✓                       │
+│                                                                 │
+│  explorer.exe (always running)                                  │
+│    └─ ScreenCapture.dll (lives here silently)                   │
+│         │                                                       │
+│         ├─ WH_KEYBOARD_LL hook                                  │
+│         ├─ Overlay Window (borderless, always-on-top)           │
+│         └─ Worker Thread Pool                                   │
+│                   │                                             │
+│           F8/F9 hotkey                                          │
+│                   │                                             │
+│    ┌──────────────▼──────────────────┐                          │
+│    │  UI Automation (IUIAutomation)  │                          │
+│    │  + DXGI/BitBlt screen capture   │                          │
+│    └──────────────┬──────────────────┘                          │
+└───────────────────┼─────────────────────────────────────────────┘
+                    │ HTTPS (WinINet)
+       ┌────────────▼──────────────┐
+       │   vedax.vercel.app         │
+       │   /api/verify   (HWID)     │
+       │   /api/config   (models)   │
+       │   /api/ai       (prompt)   │
+       └────────────┬──────────────┘
+                    │
+       ┌────────────▼──────────────┐
+       │   Google Gemini API        │
+       │   (keys never leave        │
+       │    the proxy server)       │
+       └───────────────────────────┘
 ```
 
 ---
@@ -87,17 +91,13 @@ The DLL installs a **low-level keyboard hook** (`WH_KEYBOARD_LL`), captures text
 ```
 win-ghost-loader/
 │
-├── ScreenCaptureDLL.cpp      # Main DLL — all features (~1800 lines, C++17)
+├── ScreenCaptureDLL.cpp      # Main DLL — all features (~2297 lines, C++17)
 ├── ScreenCaptureSupport.h    # namespace sc:: — response cleaning, newline norm
 ├── HttpSupport.h             # RAII WinINet HTTPS client, deadline + cancel aware
 ├── JsonSupport.h             # Minimal JSON string parser helpers (sc:: namespace)
 ├── ClipboardSupport.h        # RAII Win32 clipboard open/set/close helpers
 │
-├── Injector.cpp              # Silent remote-thread DLL injector (no window)
-├── Injector.manifest         # UAC: requireAdministrator
-├── Injector.rc               # Resource script to embed the manifest
-│
-├── VedaLauncher.cpp          # Direct launcher (Veda.exe) with mutex + error UI
+├── VedaLauncher.cpp          # Veda.exe — injects DLL into explorer, exits immediately
 │
 ├── regression_tests.cpp      # Full unit test suite (564 assertions, no hooks/net)
 ├── http_smoke.cpp            # Live HTTP smoke test against /api/verify
@@ -123,7 +123,7 @@ win-ghost-loader/
 - Sends the text under the cursor to **Google Gemini** via the Veda proxy server.
 - Supports **8 subjects** with tailored system prompts (Python, Java, C, C++, DBMS, Analytical, Communication Skills, Others).
 - Cycle subjects with **Shift+F8**.
-- AI responses cleaned of Markdown fences, preserving code indentation.
+- AI responses cleaned of Markdown fences. Code returned with **zero indentation** (flat, column-0 output).
 - Answers stored in `VedaData/qa/` next to the DLL.
 
 ### 📝 MCQ Solver (F9)
@@ -140,12 +140,13 @@ win-ghost-loader/
 - AI answer is loaded silently into a typed buffer.
 - Press **F6** once to enable — each subsequent F6 injects the next Unicode character via `SendInput(KEYEVENTF_UNICODE)`.
 - Handles multi-byte Unicode, CJK, emoji, CRLF normalization.
+- Auto-clears editor auto-indent after every newline (`End→Shift+Home→Delete`) so Python/Java indentation is typed exactly as-is.
 - **F6 × 2 fast** = reset buffer to start.
 - **F12** = reset buffer index to 0.
 - **Ctrl+F6** = load clipboard content into buffer.
 
 ### 🖥️ Always-On-Top Overlay
-- Borderless, always-on-top, glassmorphic floating window.
+- Borderless, always-on-top, white semi-transparent (20% opacity) floating window.
 - Three modes:
   - **Mode 0**: Shortcut cheatsheet
   - **Mode 1**: AI answer or MCQ suggestion
@@ -172,6 +173,12 @@ win-ghost-loader/
 - LCG random seed seeded with `GetTickCount() XOR cursor position` — no two moves are identical.
 - Variable per-step delay: 4–14ms, peaking at midpoint, with ±4ms noise.
 
+### 👻 Zero Footprint Launch
+- `Veda.exe` injects `ScreenCapture.dll` into the always-running `explorer.exe` process.
+- `Veda.exe` **exits completely** after injection — no background Veda process remains.
+- DLL auto-starts its hook thread via `DllMain` on `DLL_PROCESS_ATTACH`.
+- On `Alt+Q`: DLL calls `FreeLibraryAndExitThread` to cleanly unload itself from explorer.
+
 ---
 
 ## Hotkeys
@@ -190,7 +197,7 @@ win-ghost-loader/
 | **Ctrl+F6** | Load clipboard content into stealth typing buffer |
 | **Ctrl+Shift+C** | Copy current displayed answer to clipboard |
 | **Alt+S** | Take fullscreen screenshot → save as PNG |
-| **Alt+Q** | Graceful shutdown — drains all background workers, releases DLL |
+| **Alt+Q** | Graceful shutdown — drains all background workers, unloads DLL from explorer |
 
 ---
 
@@ -238,15 +245,6 @@ g++ -std=c++17 -O2 -Wall -Wextra -municode -mwindows -static \
     -o Veda.exe VedaLauncher.cpp -luser32 -lkernel32
 ```
 
-### Injector (`Injector.exe`)
-
-```cmd
-windres Injector.rc -o Injector_res.o
-g++ -O2 -mwindows -o Injector.exe Injector.cpp Injector_res.o ^
-    -lkernel32 -lpsapi -luser32 ^
-    -static-libgcc -static-libstdc++ -Wl,-Bstatic -lpthread -Wl,-Bdynamic
-```
-
 ### Obfuscated / Strip Build (for distribution)
 
 ```bash
@@ -285,7 +283,17 @@ Place `user_config.json` in the **same folder** as `ScreenCapture.dll`:
 ### Startup Flow
 
 ```
-DLL loaded (DllMain or StartHook)
+Double-click Veda.exe
+    │
+    ├─ Single-instance check (mutex probe)
+    ├─ Find explorer.exe PID (CreateToolhelp32Snapshot)
+    ├─ OpenProcess explorer.exe
+    ├─ RemoteThread → SetDllDirectoryW(VedaFolder)  ← so explorer finds libwinpthread-1.dll
+    ├─ RemoteThread → LoadLibraryW(ScreenCapture.dll) ← DLL injected into explorer
+    ├─ RemoteThread → SetDllDirectoryW("")           ← reset search path
+    └─ Veda.exe EXITS ← completely gone from Task Manager
+
+Inside explorer.exe — ScreenCapture.dll DllMain fires:
     │
     ├─ Read user_config.json
     ├─ GET /api/verify?hwid=&deviceId=&name=&reg=
@@ -294,7 +302,7 @@ DLL loaded (DllMain or StartHook)
     ├─ If approved:
     │   └─ GET /api/config  ← {models: ["models/gemini-2.5-flash", ...]}
     │
-    ├─ Start overlay thread (glassmorphic window, Mode 0 = shortcuts)
+    ├─ Start overlay thread (white 20% opacity window, Mode 0 = shortcuts)
     └─ Install WH_KEYBOARD_LL hook → enter GetMessage loop
 ```
 
@@ -311,7 +319,7 @@ F8 pressed
     │   ├─ If empty: BitBlt screenshot fallback
     │   ├─ POST /api/ai {prompt, model:"auto", hwid, deviceId}
     │   │       ← Gemini response JSON
-    │   ├─ Clean response (strip outer Markdown fence)
+    │   ├─ Clean response (strip outer Markdown fence, zero indentation)
     │   ├─ SetAnswer → overlay Mode 1, load stealth typing buffer
     │   └─ Save to VedaData/qa/qa_YYYYMMDD_HHMMSS.txt
 ```
@@ -340,7 +348,8 @@ F6 (typing enabled)
     └─ Each subsequent F6 press:
         ├─ Read next wchar_t from g_stealthBuf
         ├─ Build INPUT with KEYEVENTF_UNICODE
-        └─ SendInput(2, inp, sizeof(INPUT))  (key down + key up)
+        ├─ SendInput(2, inp, sizeof(INPUT))  (key down + key up)
+        └─ After '\n': send End→Shift+Home→Delete to clear editor auto-indent
 ```
 
 ### Mouse Movement
@@ -403,13 +412,12 @@ With `user_config.json`:
 
 | File | Purpose | Lines |
 |---|---|---|
-| `ScreenCaptureDLL.cpp` | Main DLL payload — all runtime logic | ~1800 |
+| `ScreenCaptureDLL.cpp` | Main DLL payload — all runtime logic | ~2297 |
 | `ScreenCaptureSupport.h` | `namespace sc::` — `CleanResponse`, `NormalizeNewlines`, `McqLetter` | 32 |
 | `HttpSupport.h` | RAII HTTPS client — deadline, cancel, body size limit | 53 |
 | `JsonSupport.h` | Lightweight JSON string/value reader (no external dependency) | ~80 |
 | `ClipboardSupport.h` | RAII Win32 clipboard API wrapper | ~40 |
-| `Injector.cpp` | Silent `explorer.exe` injector with `rundll32` fallback | 135 |
-| `VedaLauncher.cpp` | Single-instance launcher with named mutex and error dialogs | 70 |
+| `VedaLauncher.cpp` | Explorer injector — `SetDllDirectoryW` + `LoadLibraryW` remote threads, exits immediately | ~165 |
 | `regression_tests.cpp` | Full test suite compiled against real source, no system side-effects | 162 |
 | `http_smoke.cpp` | CLI tool to test live `/api/verify` endpoint | 43 |
 | `third_party/json.hpp` | nlohmann/json 3.12.0 single-header library | ~25000 |

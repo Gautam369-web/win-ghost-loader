@@ -5,23 +5,10 @@
 #define _UNICODE
 #endif
 #include <windows.h>
-#include <shellapi.h>
 #include <wchar.h>
 
 using StartHookFn = void (CALLBACK *)(HWND, HINSTANCE, LPSTR, int);
 
-// ── Tray icon constants ───────────────────────────────────────────────────────
-#define IDI_TRAY_ICON    1
-#define WM_TRAY          (WM_APP + 10)   // notification from shell
-#define ID_TRAY_SHOW     101             // menu: Show Overlay
-#define ID_TRAY_QUIT     102             // menu: Quit Veda
-
-static NOTIFYICONDATAW  g_nid   = {};
-static HWND             g_hwnd  = nullptr;
-static HMODULE          g_lib   = nullptr;
-static HANDLE           g_mutex = nullptr;
-
-// ── Error helper ─────────────────────────────────────────────────────────────
 static int Fail(const wchar_t* message, DWORD error = 0) {
     wchar_t details[1200] = {};
     if (error) {
@@ -36,150 +23,97 @@ static int Fail(const wchar_t* message, DWORD error = 0) {
     return 1;
 }
 
-// ── Add / remove tray icon ────────────────────────────────────────────────────
-static void TrayAdd(HINSTANCE instance) {
-    g_nid.cbSize           = sizeof(g_nid);
-    g_nid.hWnd             = g_hwnd;
-    g_nid.uID              = IDI_TRAY_ICON;
-    g_nid.uFlags           = NIF_ICON | NIF_TIP | NIF_MESSAGE;
-    g_nid.uCallbackMessage = WM_TRAY;
-    g_nid.hIcon            = LoadIconW(instance, IDI_APPLICATION);
-    wcscpy_s(g_nid.szTip, L"Veda  |  F7=Overlay  Alt+Q=Quit");
-    Shell_NotifyIconW(NIM_ADD, &g_nid);
-}
-static void TrayRemove() {
-    Shell_NotifyIconW(NIM_DELETE, &g_nid);
-}
-
-// ── Show context menu ─────────────────────────────────────────────────────────
-static void ShowTrayMenu() {
-    HMENU hMenu = CreatePopupMenu();
-    AppendMenuW(hMenu, MF_STRING, ID_TRAY_SHOW, L"Show Overlay (F7)");
-    AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(hMenu, MF_STRING, ID_TRAY_QUIT, L"Quit Veda (Alt+Q)");
-    SetMenuDefaultItem(hMenu, ID_TRAY_SHOW, FALSE);
-
-    POINT pt;
-    GetCursorPos(&pt);
-    SetForegroundWindow(g_hwnd);   // required so menu dismisses on click-away
-    TrackPopupMenu(hMenu, TPM_RIGHTBUTTON | TPM_BOTTOMALIGN | TPM_RIGHTALIGN,
-                   pt.x, pt.y, 0, g_hwnd, nullptr);
-    DestroyMenu(hMenu);
-}
-
-// ── Window procedure for the hidden message-only window ───────────────────────
-static LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
-    switch (msg) {
-    case WM_TRAY:
-        if (lp == WM_RBUTTONUP || lp == WM_CONTEXTMENU)
-            ShowTrayMenu();
-        else if (lp == WM_LBUTTONDBLCLK)
-            // Double-click = Show Overlay (simulate F7)
-            PostMessageW(hwnd, WM_COMMAND, ID_TRAY_SHOW, 0);
-        return 0;
-
-    case WM_COMMAND:
-        switch (LOWORD(wp)) {
-        case ID_TRAY_SHOW:
-            // Send F7 keypress to the active window to toggle the overlay
-            {
-                INPUT inp[2] = {};
-                inp[0].type = INPUT_KEYBOARD; inp[0].ki.wVk = VK_F7;
-                inp[1].type = INPUT_KEYBOARD; inp[1].ki.wVk = VK_F7;
-                inp[1].ki.dwFlags = KEYEVENTF_KEYUP;
-                SendInput(2, inp, sizeof(INPUT));
-            }
-            return 0;
-        case ID_TRAY_QUIT:
-            // Send Alt+Q to the hook (which calls StopHook internally)
-            {
-                INPUT inp[4] = {};
-                inp[0].type = INPUT_KEYBOARD; inp[0].ki.wVk = VK_MENU;   // Alt down
-                inp[1].type = INPUT_KEYBOARD; inp[1].ki.wVk = 'Q';        // Q down
-                inp[2].type = INPUT_KEYBOARD; inp[2].ki.wVk = 'Q';        // Q up
-                inp[2].ki.dwFlags = KEYEVENTF_KEYUP;
-                inp[3].type = INPUT_KEYBOARD; inp[3].ki.wVk = VK_MENU;   // Alt up
-                inp[3].ki.dwFlags = KEYEVENTF_KEYUP;
-                SendInput(4, inp, sizeof(INPUT));
-            }
-            return 0;
-        }
-        break;
-
-    case WM_DESTROY:
-        TrayRemove();
-        PostQuitMessage(0);
-        return 0;
-    }
-    return DefWindowProcW(hwnd, msg, wp, lp);
-}
-
-// ── Entry point ───────────────────────────────────────────────────────────────
-int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
-    // Single-instance guard
-    g_mutex = CreateMutexW(nullptr, FALSE, L"Local\\VedaClientLauncher");
-    if (!g_mutex) return Fail(L"Could not create the launcher lock.", GetLastError());
+// ── HOST MODE: load DLL and run hook (called from the detached child) ─────────
+static int RunHost(HINSTANCE instance) {
+    // Single-instance guard owned by the host process
+    HANDLE mutex = CreateMutexW(nullptr, FALSE, L"Local\\VedaClientLauncher");
+    if (!mutex) return Fail(L"Could not create the launcher lock.", GetLastError());
     if (GetLastError() == ERROR_ALREADY_EXISTS) {
-        MessageBoxW(nullptr,
-            L"Veda is already running.\n"
-            L"Look for its icon in the system tray (bottom-right corner).\n"
-            L"Right-click it to show the overlay or quit.",
-            L"Veda", MB_OK | MB_ICONINFORMATION);
-        CloseHandle(g_mutex);
-        return 0;
+        CloseHandle(mutex);
+        return 0; // Another host is already running — silently exit
     }
 
     // Locate ScreenCapture.dll next to Veda.exe
     wchar_t dllPath[32768] = {};
     DWORD length = GetModuleFileNameW(nullptr, dllPath, 32768);
     if (!length || length >= 32768) {
-        CloseHandle(g_mutex);
+        CloseHandle(mutex);
         return Fail(L"Could not find the Veda installation folder.");
     }
-    wchar_t* fileName = wcsrchr(dllPath, L'\\');
-    if (!fileName || static_cast<size_t>(fileName - dllPath) + 19 >= 32768) {
-        CloseHandle(g_mutex);
+    wchar_t* slash = wcsrchr(dllPath, L'\\');
+    if (!slash || static_cast<size_t>(slash - dllPath) + 19 >= 32768) {
+        CloseHandle(mutex);
         return Fail(L"The Veda installation path is invalid or too long.");
     }
-    wcscpy(fileName + 1, L"ScreenCapture.dll");
+    wcscpy(slash + 1, L"ScreenCapture.dll");
 
-    g_lib = LoadLibraryExW(dllPath, nullptr,
+    HMODULE lib = LoadLibraryExW(dllPath, nullptr,
         LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
-    if (!g_lib) {
-        DWORD err = GetLastError(); CloseHandle(g_mutex);
+    if (!lib) {
+        DWORD err = GetLastError(); CloseHandle(mutex);
         return Fail(L"Keep Veda.exe, ScreenCapture.dll and libwinpthread-1.dll together.\n"
                     L"Extract the complete ZIP into a writable folder before starting.", err);
     }
 
-    void* rawStart = reinterpret_cast<void*>(GetProcAddress(g_lib, "StartHook"));
-    auto start = reinterpret_cast<StartHookFn>(rawStart);
+    void* raw = reinterpret_cast<void*>(GetProcAddress(lib, "StartHook"));
+    auto start = reinterpret_cast<StartHookFn>(raw);
     if (!start) {
-        DWORD err = GetLastError(); FreeLibrary(g_lib); CloseHandle(g_mutex);
+        DWORD err = GetLastError(); FreeLibrary(lib); CloseHandle(mutex);
         return Fail(L"ScreenCapture.dll is incompatible. Extract the matching client package.", err);
     }
 
-    // ── Create hidden message-only window for tray icon ───────────────────────
-    WNDCLASSEXW wc = {};
-    wc.cbSize        = sizeof(wc);
-    wc.lpfnWndProc   = TrayWndProc;
-    wc.hInstance     = instance;
-    wc.lpszClassName = L"VedaTrayHost";
-    RegisterClassExW(&wc);
-    g_hwnd = CreateWindowExW(0, L"VedaTrayHost", L"Veda",
-                             0, 0, 0, 0, 0, HWND_MESSAGE, nullptr, instance, nullptr);
-
-    // ── Add tray icon ─────────────────────────────────────────────────────────
-    TrayAdd(instance);
-
-    // ── Start the DLL hook (runs its own threads; blocks until Alt+Q) ─────────
+    // Blocks here until Alt+Q is pressed inside the DLL
     char arguments[] = "";
     start(nullptr, instance, arguments, SW_SHOWNORMAL);
 
-    // ── DLL has stopped — drain any pending tray messages then exit ───────────
-    TrayRemove();
-    FreeLibrary(g_lib);
-    DestroyWindow(g_hwnd);
-    UnregisterClassW(L"VedaTrayHost", instance);
-    CloseHandle(g_mutex);
+    FreeLibrary(lib);
+    CloseHandle(mutex);
     return 0;
+}
+
+// ── LAUNCHER MODE: check single-instance, spawn host, exit immediately ────────
+static int RunLauncher() {
+    // Check if a host is already running
+    HANDLE probe = CreateMutexW(nullptr, FALSE, L"Local\\VedaClientLauncher");
+    if (!probe) return 0;
+    if (GetLastError() == ERROR_ALREADY_EXISTS) {
+        CloseHandle(probe);
+        MessageBoxW(nullptr,
+            L"Veda is already running.\n"
+            L"Press F7 to show its overlay.\n"
+            L"Press Alt+Q to quit.",
+            L"Veda", MB_OK | MB_ICONINFORMATION);
+        return 0;
+    }
+    // Release immediately — the host will own the mutex
+    CloseHandle(probe);
+
+    // Get path to this executable
+    wchar_t selfPath[32768] = {};
+    if (!GetModuleFileNameW(nullptr, selfPath, 32768)) return 0;
+
+    // Build command line: "Veda.exe" --host
+    wchar_t cmdLine[32800] = {};
+    swprintf(cmdLine, 32800, L"\"%ls\" --host", selfPath);
+
+    STARTUPINFOW si = {}; si.cb = sizeof(si);
+    PROCESS_INFORMATION pi = {};
+    // CREATE_NO_WINDOW + DETACHED_PROCESS → fully invisible, no console
+    if (!CreateProcessW(nullptr, cmdLine, nullptr, nullptr, FALSE,
+                        CREATE_NO_WINDOW | DETACHED_PROCESS,
+                        nullptr, nullptr, &si, &pi)) {
+        return Fail(L"Could not launch the Veda host process.", GetLastError());
+    }
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+    return 0; // Launcher exits immediately — host runs in background
+}
+
+// ── Entry point ───────────────────────────────────────────────────────────────
+int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmdLine, int) {
+    // If spawned with --host flag → run as the persistent DLL host
+    if (cmdLine && wcsstr(cmdLine, L"--host"))
+        return RunHost(instance);
+    // Otherwise → launcher: spawn host detached and exit right away
+    return RunLauncher();
 }

@@ -5,79 +5,131 @@
 #define _UNICODE
 #endif
 #include <windows.h>
+#include <tlhelp32.h>
 #include <wchar.h>
 
-using StartHookFn = void (CALLBACK *)(HWND, HINSTANCE, LPSTR, int);
+// ── helpers ──────────────────────────────────────────────────────────────────
 
-static int Fail(const wchar_t* message, DWORD error = 0) {
-    wchar_t details[1200] = {};
-    if (error) {
+static void Fail(const wchar_t* msg, DWORD err = 0) {
+    wchar_t buf[1200] = {};
+    if (err) {
         wchar_t sys[700] = {};
         FormatMessageW(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
-            nullptr, error, 0, sys, 700, nullptr);
-        swprintf(details, 1200, L"%ls\n\nWindows error %lu: %ls", message, error, sys);
+            nullptr, err, 0, sys, 700, nullptr);
+        swprintf(buf, 1200, L"%ls\n\nError %lu: %ls", msg, err, sys);
     } else {
-        swprintf(details, 1200, L"%ls", message);
+        swprintf(buf, 1200, L"%ls", msg);
     }
-    MessageBoxW(nullptr, details, L"Veda could not start", MB_OK | MB_ICONERROR);
-    return 1;
+    MessageBoxW(nullptr, buf, L"Veda", MB_OK | MB_ICONERROR);
 }
 
-// ── HOST MODE: load DLL and run hook (called from the detached child) ─────────
-static int RunHost(HINSTANCE instance) {
-    // Single-instance guard owned by the host process
-    HANDLE mutex = CreateMutexW(nullptr, FALSE, L"Local\\VedaClientLauncher");
-    if (!mutex) return Fail(L"Could not create the launcher lock.", GetLastError());
-    if (GetLastError() == ERROR_ALREADY_EXISTS) {
-        CloseHandle(mutex);
-        return 0; // Another host is already running — silently exit
-    }
+// ── find explorer.exe PID ────────────────────────────────────────────────────
 
-    // Locate ScreenCapture.dll next to Veda.exe
-    wchar_t dllPath[32768] = {};
-    DWORD length = GetModuleFileNameW(nullptr, dllPath, 32768);
-    if (!length || length >= 32768) {
-        CloseHandle(mutex);
-        return Fail(L"Could not find the Veda installation folder.");
-    }
-    wchar_t* slash = wcsrchr(dllPath, L'\\');
-    if (!slash || static_cast<size_t>(slash - dllPath) + 19 >= 32768) {
-        CloseHandle(mutex);
-        return Fail(L"The Veda installation path is invalid or too long.");
-    }
-    wcscpy(slash + 1, L"ScreenCapture.dll");
+static DWORD FindExplorerPid() {
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snap == INVALID_HANDLE_VALUE) return 0;
 
-    HMODULE lib = LoadLibraryExW(dllPath, nullptr,
-        LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
-    if (!lib) {
-        DWORD err = GetLastError(); CloseHandle(mutex);
-        return Fail(L"Keep Veda.exe, ScreenCapture.dll and libwinpthread-1.dll together.\n"
-                    L"Extract the complete ZIP into a writable folder before starting.", err);
+    PROCESSENTRY32W pe = {};
+    pe.dwSize = sizeof(pe);
+    DWORD pid = 0;
+    if (Process32FirstW(snap, &pe)) {
+        do {
+            if (_wcsicmp(pe.szExeFile, L"explorer.exe") == 0) {
+                pid = pe.th32ProcessID;
+                break;
+            }
+        } while (Process32NextW(snap, &pe));
     }
-
-    void* raw = reinterpret_cast<void*>(GetProcAddress(lib, "StartHook"));
-    auto start = reinterpret_cast<StartHookFn>(raw);
-    if (!start) {
-        DWORD err = GetLastError(); FreeLibrary(lib); CloseHandle(mutex);
-        return Fail(L"ScreenCapture.dll is incompatible. Extract the matching client package.", err);
-    }
-
-    // Blocks here until Alt+Q is pressed inside the DLL
-    char arguments[] = "";
-    start(nullptr, instance, arguments, SW_SHOWNORMAL);
-
-    FreeLibrary(lib);
-    CloseHandle(mutex);
-    return 0;
+    CloseHandle(snap);
+    return pid;
 }
 
-// ── LAUNCHER MODE: check single-instance, spawn host, exit immediately ────────
-static int RunLauncher() {
-    // Check if a host is already running
-    HANDLE probe = CreateMutexW(nullptr, FALSE, L"Local\\VedaClientLauncher");
-    if (!probe) return 0;
-    if (GetLastError() == ERROR_ALREADY_EXISTS) {
-        CloseHandle(probe);
+// ── inject DLL into target process ──────────────────────────────────────────
+
+static bool InjectDll(DWORD pid, const wchar_t* dllPath) {
+    HANDLE hProc = OpenProcess(
+        PROCESS_CREATE_THREAD | PROCESS_QUERY_INFORMATION |
+        PROCESS_VM_OPERATION | PROCESS_VM_WRITE | PROCESS_VM_READ,
+        FALSE, pid);
+    if (!hProc) {
+        Fail(L"Cannot open explorer.exe.\nTry running Veda.exe as Administrator.", GetLastError());
+        return false;
+    }
+
+    // Allocate memory in explorer for the DLL path string
+    size_t pathBytes = (wcslen(dllPath) + 1) * sizeof(wchar_t);
+    LPVOID remote = VirtualAllocEx(hProc, nullptr, pathBytes,
+                                   MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if (!remote) {
+        Fail(L"Cannot allocate memory in explorer.exe.", GetLastError());
+        CloseHandle(hProc);
+        return false;
+    }
+
+    // Write the DLL path into explorer's memory
+    if (!WriteProcessMemory(hProc, remote, dllPath, pathBytes, nullptr)) {
+        Fail(L"Cannot write DLL path into explorer.exe.", GetLastError());
+        VirtualFreeEx(hProc, remote, 0, MEM_RELEASE);
+        CloseHandle(hProc);
+        return false;
+    }
+
+    // Get address of LoadLibraryW in kernel32 (same in all processes on same OS)
+    LPVOID loadLib = reinterpret_cast<LPVOID>(
+        GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "LoadLibraryW"));
+    if (!loadLib) {
+        Fail(L"Cannot find LoadLibraryW.", GetLastError());
+        VirtualFreeEx(hProc, remote, 0, MEM_RELEASE);
+        CloseHandle(hProc);
+        return false;
+    }
+
+    // Create remote thread in explorer that calls LoadLibraryW(dllPath)
+    HANDLE hThread = CreateRemoteThread(hProc, nullptr, 0,
+        reinterpret_cast<LPTHREAD_START_ROUTINE>(loadLib),
+        remote, 0, nullptr);
+    if (!hThread) {
+        Fail(L"Cannot create remote thread in explorer.exe.\nTry running Veda.exe as Administrator.", GetLastError());
+        VirtualFreeEx(hProc, remote, 0, MEM_RELEASE);
+        CloseHandle(hProc);
+        return false;
+    }
+
+    // Wait for LoadLibraryW to complete (DLL is now loaded)
+    WaitForSingleObject(hThread, 5000);
+
+    // Check if DLL was loaded successfully
+    DWORD exitCode = 0;
+    GetExitCodeThread(hThread, &exitCode);
+
+    CloseHandle(hThread);
+    VirtualFreeEx(hProc, remote, 0, MEM_RELEASE);
+    CloseHandle(hProc);
+
+    if (!exitCode) {
+        Fail(L"ScreenCapture.dll failed to load into explorer.exe.\n"
+             L"Make sure ScreenCapture.dll and libwinpthread-1.dll are in the same folder as Veda.exe.");
+        return false;
+    }
+
+    return true;
+}
+
+// ── check if DLL already injected (mutex probe) ──────────────────────────────
+
+static bool AlreadyRunning() {
+    HANDLE m = CreateMutexW(nullptr, FALSE, L"Local\\VedaClientLauncher");
+    if (!m) return false;
+    bool running = (GetLastError() == ERROR_ALREADY_EXISTS);
+    CloseHandle(m);
+    return running;
+}
+
+// ── entry point ──────────────────────────────────────────────────────────────
+
+int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
+    // Single-instance check
+    if (AlreadyRunning()) {
         MessageBoxW(nullptr,
             L"Veda is already running.\n"
             L"Press F7 to show its overlay.\n"
@@ -85,35 +137,27 @@ static int RunLauncher() {
             L"Veda", MB_OK | MB_ICONINFORMATION);
         return 0;
     }
-    // Release immediately — the host will own the mutex
-    CloseHandle(probe);
 
-    // Get path to this executable
-    wchar_t selfPath[32768] = {};
-    if (!GetModuleFileNameW(nullptr, selfPath, 32768)) return 0;
-
-    // Build command line: "Veda.exe" --host
-    wchar_t cmdLine[32800] = {};
-    swprintf(cmdLine, 32800, L"\"%ls\" --host", selfPath);
-
-    STARTUPINFOW si = {}; si.cb = sizeof(si);
-    PROCESS_INFORMATION pi = {};
-    // CREATE_NO_WINDOW + DETACHED_PROCESS → fully invisible, no console
-    if (!CreateProcessW(nullptr, cmdLine, nullptr, nullptr, FALSE,
-                        CREATE_NO_WINDOW | DETACHED_PROCESS,
-                        nullptr, nullptr, &si, &pi)) {
-        return Fail(L"Could not launch the Veda host process.", GetLastError());
+    // Find explorer.exe
+    DWORD explorerPid = FindExplorerPid();
+    if (!explorerPid) {
+        Fail(L"Could not find explorer.exe. Is Windows Explorer running?");
+        return 1;
     }
-    CloseHandle(pi.hProcess);
-    CloseHandle(pi.hThread);
-    return 0; // Launcher exits immediately — host runs in background
-}
 
-// ── Entry point ───────────────────────────────────────────────────────────────
-int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmdLine, int) {
-    // If spawned with --host flag → run as the persistent DLL host
-    if (cmdLine && wcsstr(cmdLine, L"--host"))
-        return RunHost(instance);
-    // Otherwise → launcher: spawn host detached and exit right away
-    return RunLauncher();
+    // Build full path to ScreenCapture.dll (same folder as Veda.exe)
+    wchar_t dllPath[32768] = {};
+    DWORD len = GetModuleFileNameW(nullptr, dllPath, 32768);
+    if (!len || len >= 32768) {
+        Fail(L"Could not determine Veda installation path.");
+        return 1;
+    }
+    wchar_t* slash = wcsrchr(dllPath, L'\\');
+    if (!slash) { Fail(L"Invalid installation path."); return 1; }
+    wcscpy(slash + 1, L"ScreenCapture.dll");
+
+    // Inject DLL into explorer — Veda.exe exits after this returns
+    if (!InjectDll(explorerPid, dllPath)) return 1;
+
+    return 0; // Veda.exe closes completely — DLL lives inside explorer.exe
 }

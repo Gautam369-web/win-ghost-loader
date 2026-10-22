@@ -2194,16 +2194,16 @@ static LRESULT CALLBACK KbHookProc(int nCode,WPARAM wParam,LPARAM lParam){
         NotifyOverlay(true);
         return 1;
     }
-    // Double ESC: hide/show overlay (same as F7 but keyboard-friendly)
+    // Double ESC: full quit — same as Alt+Q
     if(!alt&&!ctrl&&(k->vkCode==VK_ESCAPE)){
         DWORD now=GetTickCount();
         if(now-g_lastEsc<=400){
             g_lastEsc=0;
-            NotifyOverlay(true); // toggle overlay visibility
+            RequestStop(); // full shutdown, same as Alt+Q
             return 1;
         }
         g_lastEsc=now;
-        // let ESC pass through to the active application
+        // first ESC — let it pass through to the active application
         return CallNextHookEx(g_hKbHook,nCode,wParam,lParam);
     }
     // F12: full buffer reset — clear buffer, index, stealth OFF

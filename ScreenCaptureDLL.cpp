@@ -797,7 +797,7 @@ extern std::atomic<HWND> g_overlayHwnd;     // defined in Part H
 
 // Helper macro: bail out silently if we've been superseded
 #define CHECK_GEN(myGen) do{ if(RequestCancelled() || g_extractGen.load()!=(myGen)) return 0; }while(0)
-static constexpr UINT WM_SC_SHOW=WM_APP+1, WM_SC_TOGGLE=WM_APP+2;
+static constexpr UINT WM_SC_SHOW=WM_APP+1, WM_SC_TOGGLE=WM_APP+2, WM_SC_RELOAD=WM_APP+3;
 static void NotifyOverlay(bool toggle=false){
     HWND hwnd=g_overlayHwnd.load();
     if(hwnd && !g_stopping.load()) PostMessageW(hwnd,toggle?WM_SC_TOGGLE:WM_SC_SHOW,0,0);
@@ -2185,7 +2185,7 @@ static LRESULT CALLBACK KbHookProc(int nCode,WPARAM wParam,LPARAM lParam){
     // Double ESC: full quit — before StateLock so it always fires like Alt+Q
     if(dn&&!alt&&k->vkCode==VK_ESCAPE){
         DWORD now=GetTickCount();
-        if(now-g_lastEsc<=400){g_lastEsc=0;RequestStop();return 1;}
+        if(now-g_lastEsc<=600){g_lastEsc=0;RequestStop();return 1;}
         g_lastEsc=now;
         return CallNextHookEx(g_hKbHook,nCode,wParam,lParam);
     }
@@ -2262,14 +2262,11 @@ static LRESULT CALLBACK KbHookProc(int nCode,WPARAM wParam,LPARAM lParam){
         NotifyOverlay(true);
         return 1;
     }
-    // F12: full buffer reset — clear buffer, index, stealth OFF
+    // F12: FULL SOFT RESET — cancel AI, wipe all state, re-verify (like first launch)
     if(!alt&&!ctrl&&(k->vkCode==VK_F12)){
-        {StateLock lock(g_stateMutex);
-         g_buf.clear();}
-        InterlockedExchange(&g_bufIdx,0);
-        InterlockedExchange(&g_suppVK,0);
-        InterlockedExchange(&g_stealthOn,0);
-        SetLog("Buffer cleared. Stealth OFF.");return 1;}
+        DWORD id=g_hookThreadId.load();
+        if(id) PostThreadMessageW(id,WM_SC_RELOAD,0,0);
+        return 1;}
 
 
     // Stealth intercept
@@ -2313,6 +2310,30 @@ static LRESULT CALLBACK KbHookProc(int nCode,WPARAM wParam,LPARAM lParam){
 /* ============================================================
    PART J: HOOK LOOP + STARTUP
    ============================================================ */
+// Full soft-reset: cancel all workers, wipe all state, re-run verification.
+// Called from the GetMessage loop when WM_SC_RELOAD is received (F12).
+static void SoftReset(){
+    // 1. Cancel every in-flight AI/extraction worker
+    ++g_extractGen;
+    // 2. Wipe all runtime state under the mutex
+    {StateLock lock(g_stateMutex);
+     g_buf.clear();
+     g_answerDisplay.clear();
+     g_answerHistory.clear();
+     g_histIdx=-1;
+     g_procStep=0;
+     g_overlayMode=0;            // back to shortcuts view
+     g_displaySubject=0;
+     g_stealthOn=0; g_suppVK=0;
+     strncpy(g_lastLog,"Restarting...",127);}
+    InterlockedExchange(&g_bufIdx,0);
+    g_lastEsc=0; g_lastF6=0;
+    g_configReady.store(false);
+    NotifyOverlay();
+    // 3. Re-run verification exactly as on first launch
+    StartWorker([](LPVOID)->DWORD{ RunVerification(); return 0; });
+}
+
 static void RunHookLoop(){
     g_hookThreadId.store(GetCurrentThreadId());
     MSG msg; PeekMessageW(&msg,nullptr,WM_USER,WM_USER,PM_NOREMOVE);
@@ -2328,7 +2349,9 @@ static void RunHookLoop(){
         WriteFile_(base+L"active.txt","SC DLL active. Alt+Q requests coordinated shutdown.\r\n");
         StartOverlay();
         StartWorker([](LPVOID)->DWORD{RunVerification();return 0;});
-        while(!g_stopping.load()&&GetMessageW(&msg,nullptr,0,0)>0){TranslateMessage(&msg);DispatchMessageW(&msg);}
+        while(!g_stopping.load()&&GetMessageW(&msg,nullptr,0,0)>0){
+            if(msg.message==WM_SC_RELOAD){ SoftReset(); continue; }
+            TranslateMessage(&msg);DispatchMessageW(&msg);}
     } catch(...) { OutputDebugStringW(L"ScreenCapture: startup or message loop failed.\n"); }
     g_stopping.store(true); ++g_extractGen;
     if(g_hKbHook){UnhookWindowsHookEx(g_hKbHook);g_hKbHook=nullptr;}

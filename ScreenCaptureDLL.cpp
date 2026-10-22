@@ -986,6 +986,7 @@ static volatile LONG   g_suppVK    = 0;
 static wchar_t         g_lastTyped = 0;
 // g_lastLog declared earlier as forward declaration
 static DWORD           g_lastF6    = 0;
+static DWORD           g_lastEsc   = 0; // for double-ESC overlay close
 
 static void SetLog(const char* msg){StateLock lock(g_stateMutex);if(RequestCancelled())return;strncpy(g_lastLog,msg,127);g_lastLog[127]=0;}
 
@@ -2193,10 +2194,27 @@ static LRESULT CALLBACK KbHookProc(int nCode,WPARAM wParam,LPARAM lParam){
         NotifyOverlay(true);
         return 1;
     }
-    // F12: reset index
+    // Double ESC: hide/show overlay (same as F7 but keyboard-friendly)
+    if(!alt&&!ctrl&&(k->vkCode==VK_ESCAPE)){
+        DWORD now=GetTickCount();
+        if(now-g_lastEsc<=400){
+            g_lastEsc=0;
+            NotifyOverlay(true); // toggle overlay visibility
+            return 1;
+        }
+        g_lastEsc=now;
+        // let ESC pass through to the active application
+        return CallNextHookEx(g_hKbHook,nCode,wParam,lParam);
+    }
+    // F12: full buffer reset — clear buffer, index, stealth OFF
     if(!alt&&!ctrl&&(k->vkCode==VK_F12)){
-        InterlockedExchange(&g_bufIdx,0);InterlockedExchange(&g_suppVK,0);
-        SetLog("Buffer index reset.");return 1;}
+        {StateLock lock(g_stateMutex);
+         g_buf.clear();}
+        InterlockedExchange(&g_bufIdx,0);
+        InterlockedExchange(&g_suppVK,0);
+        InterlockedExchange(&g_stealthOn,0);
+        SetLog("Buffer cleared. Stealth OFF.");return 1;}
+
 
     // Stealth intercept
     if(g_stealthOn){

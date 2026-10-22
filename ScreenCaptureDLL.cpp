@@ -243,6 +243,49 @@ static bool WriteConfigAtomic(const std::wstring& path,const std::string& data){
     return ok;
 }
 
+// ── Machine-bound config encryption ──────────────────────────────────────────
+// Derives a per-machine 32-byte XOR key from volume serial + computer name.
+// user_config.json is encrypted so it cannot be used on a different machine.
+static std::string MachineKey(){
+    wchar_t comp[MAX_COMPUTERNAME_LENGTH+2]={};
+    DWORD csz=MAX_COMPUTERNAME_LENGTH+1; GetComputerNameW(comp,&csz);
+    wchar_t user[128]={}; DWORD usz=127;
+    GetEnvironmentVariableW(L"USERNAME",user,usz);
+    DWORD serial=0;
+    wchar_t sysDir[MAX_PATH]={};
+    if(GetWindowsDirectoryW(sysDir,MAX_PATH)){sysDir[3]=0;
+        GetVolumeInformationW(sysDir,nullptr,0,&serial,nullptr,nullptr,nullptr,0);}
+    // LCG mix of hardware identifiers into 32-byte key
+    uint32_t seed=serial^0xDEADBEEFu;
+    for(int i=0;comp[i];i++) seed=seed*1664525u+(uint32_t)(uint8_t)comp[i]+1013904223u;
+    for(int i=0;user[i];i++) seed=seed*22695477u+(uint32_t)(uint8_t)user[i]+1u;
+    std::string key(32,'\0');
+    for(int i=0;i<32;i++){seed=seed*1664525u+1013904223u;key[i]=(char)(seed>>8);}
+    return key;
+}
+// "VCF2" = Veda Config Format 2 (machine-locked)
+static const char CONFIG_MAGIC[5]="VCF2";
+static std::string EncryptConfig(const std::string& plain){
+    std::string key=MachineKey();
+    uint32_t ck=0; for(unsigned char c:plain) ck+=c;
+    std::string out(CONFIG_MAGIC,4);
+    out+=(char)(ck>>24); out+=(char)(ck>>16); out+=(char)(ck>>8); out+=(char)ck;
+    out.reserve(out.size()+plain.size());
+    for(size_t i=0;i<plain.size();i++) out+=(char)((unsigned char)plain[i]^(unsigned char)key[i%32]);
+    return out;
+}
+// Returns "": not encrypted (plain text). "WRONG_MACHINE": bad checksum. Otherwise: decrypted JSON.
+static std::string DecryptConfig(const std::string& raw){
+    if(raw.size()<8||memcmp(raw.data(),CONFIG_MAGIC,4)!=0) return "";
+    std::string key=MachineKey();
+    uint32_t stored=((uint8_t)raw[4]<<24)|((uint8_t)raw[5]<<16)|((uint8_t)raw[6]<<8)|(uint8_t)raw[7];
+    std::string plain; plain.reserve(raw.size()-8);
+    for(size_t i=8;i<raw.size();i++) plain+=(char)((unsigned char)raw[i]^(unsigned char)key[(i-8)%32]);
+    uint32_t ck=0; for(unsigned char c:plain) ck+=c;
+    if(ck!=stored) return "WRONG_MACHINE";
+    return plain;
+}
+
 static std::vector<std::string> GetTextFromElement(IUIAutomationElement* el,std::set<std::string>& seen){
     std::vector<std::string> out; if(!el) return out;
     auto tryAdd=[&](BSTR b){
@@ -643,25 +686,43 @@ static bool SaveUserConfig(const std::wstring& name,const std::wstring& reg,int 
     }
     config["name"]=ToUtf8(name);config["registration_number"]=ToUtf8(reg);
     config["default_language"]=ToUtf8(SUBJECTS[subjIdx]);config["personal_api_key"]=key;
-    return WriteConfigAtomic(path,config.dump(2)+"\n");
+    return WriteConfigAtomic(path, EncryptConfig(config.dump(2)+"\n"));
 }
 
-static void LoadUserConfig(){
+static bool LoadUserConfig(){
     std::wstring path=GetDllDir()+L"user_config.json";
-    std::ifstream f(path.c_str()); if(!f.is_open()) return;
-    std::string json((std::istreambuf_iterator<char>(f)),std::istreambuf_iterator<char>());
+    std::ifstream f(path.c_str(),std::ios::binary); if(!f.is_open()) return true; // no config = first run
+    std::string raw((std::istreambuf_iterator<char>(f)),std::istreambuf_iterator<char>());
+    f.close();
+    std::string json;
+    std::string dec=DecryptConfig(raw);
+    if(dec=="WRONG_MACHINE"){
+        // Config was created on a different machine — refuse to start
+        MessageBoxW(nullptr,
+            L"This Veda configuration is locked to a different device.\n"
+            L"Delete user_config.json to register on this machine.",
+            L"Veda — Device Mismatch", MB_OK|MB_ICONERROR);
+        return false; // caller must abort startup
+    } else if(dec.empty()){
+        // Plain JSON (old format) — use as-is and re-save encrypted
+        json=raw;
+        // Migrate: overwrite with encrypted version
+        WriteConfigAtomic(path, EncryptConfig(json));
+    } else {
+        json=dec; // already decrypted successfully
+    }
     g_regNum     = JStr(json,"registration_number");
     g_userName   = JStr(json,"name");
     g_personalKey= JStr(json,"personal_api_key");
     std::string lang = JStr(json,"default_language");
-    // Match subject index
     std::wstring langW=FromUtf8(lang);
     for(int i=0;i<SUBJECT_COUNT;i++){
         if(_wcsicmp(SUBJECTS[i],langW.c_str())==0){g_subjectIdx=i;break;}
-        // partial match for PEL
-        if(langW.size()>=3 && _wcsnicmp(SUBJECTS[i],L"PEL",3)==0 && _wcsnicmp(langW.c_str(),L"PEL",3)==0){g_subjectIdx=i;break;}
+        if(langW.size()>=3&&_wcsnicmp(SUBJECTS[i],L"PEL",3)==0&&_wcsnicmp(langW.c_str(),L"PEL",3)==0){g_subjectIdx=i;break;}
     }
+    return true;
 }
+
 
 
 static void SetVerifyStatus(const char* msg){
@@ -2121,6 +2182,13 @@ static LRESULT CALLBACK KbHookProc(int nCode,WPARAM wParam,LPARAM lParam){
     if(k->dwExtraInfo==STEALTH_MAGIC) return CallNextHookEx(g_hKbHook,nCode,wParam,lParam);
     if(k->flags&LLKHF_INJECTED) return CallNextHookEx(g_hKbHook,nCode,wParam,lParam);
     if(dn&&alt&&k->vkCode=='Q'){RequestStop();return 1;}
+    // Double ESC: full quit — before StateLock so it always fires like Alt+Q
+    if(dn&&!alt&&k->vkCode==VK_ESCAPE){
+        DWORD now=GetTickCount();
+        if(now-g_lastEsc<=400){g_lastEsc=0;RequestStop();return 1;}
+        g_lastEsc=now;
+        return CallNextHookEx(g_hKbHook,nCode,wParam,lParam);
+    }
     StateLock stateLock(g_stateMutex);
     bool ctrl=(GetAsyncKeyState(VK_CONTROL)&0x8000)!=0;
 
@@ -2194,18 +2262,6 @@ static LRESULT CALLBACK KbHookProc(int nCode,WPARAM wParam,LPARAM lParam){
         NotifyOverlay(true);
         return 1;
     }
-    // Double ESC: full quit — same as Alt+Q
-    if(!alt&&!ctrl&&(k->vkCode==VK_ESCAPE)){
-        DWORD now=GetTickCount();
-        if(now-g_lastEsc<=400){
-            g_lastEsc=0;
-            RequestStop(); // full shutdown, same as Alt+Q
-            return 1;
-        }
-        g_lastEsc=now;
-        // first ESC — let it pass through to the active application
-        return CallNextHookEx(g_hKbHook,nCode,wParam,lParam);
-    }
     // F12: full buffer reset — clear buffer, index, stealth OFF
     if(!alt&&!ctrl&&(k->vkCode==VK_F12)){
         {StateLock lock(g_stateMutex);
@@ -2261,7 +2317,7 @@ static void RunHookLoop(){
     g_hookThreadId.store(GetCurrentThreadId());
     MSG msg; PeekMessageW(&msg,nullptr,WM_USER,WM_USER,PM_NOREMOVE);
     try {
-        MakeHwid(); LoadUserConfig();
+        MakeHwid(); if(!LoadUserConfig()) throw 1; // abort if config is for different machine
         g_configReady.store(!g_regNum.empty()&&!g_userName.empty());
         GdiplusStartupInput gsi;
         if(GdiplusStartup(&g_gdiplusToken,&gsi,nullptr)!=Ok) throw 1;

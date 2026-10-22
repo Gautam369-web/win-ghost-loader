@@ -44,7 +44,39 @@ static DWORD FindExplorerPid() {
     return pid;
 }
 
-// ── inject DLL into target process ──────────────────────────────────────────
+// ── run a kernel32 function with one wide-string arg in a remote process ─────
+
+static bool RemoteCallW(HANDLE hProc, const char* fn, const wchar_t* arg) {
+    LPVOID fnAddr = reinterpret_cast<LPVOID>(
+        GetProcAddress(GetModuleHandleW(L"kernel32.dll"), fn));
+    if (!fnAddr) return false;
+
+    size_t argBytes = (wcslen(arg) + 1) * sizeof(wchar_t);
+    LPVOID remArg = VirtualAllocEx(hProc, nullptr, argBytes,
+                                   MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if (!remArg) return false;
+
+    if (!WriteProcessMemory(hProc, remArg, arg, argBytes, nullptr)) {
+        VirtualFreeEx(hProc, remArg, 0, MEM_RELEASE);
+        return false;
+    }
+
+    HANDLE hT = CreateRemoteThread(hProc, nullptr, 0,
+        reinterpret_cast<LPTHREAD_START_ROUTINE>(fnAddr), remArg, 0, nullptr);
+    if (!hT) {
+        VirtualFreeEx(hProc, remArg, 0, MEM_RELEASE);
+        return false;
+    }
+
+    WaitForSingleObject(hT, 8000);
+    DWORD code = 0;
+    GetExitCodeThread(hT, &code);
+    CloseHandle(hT);
+    VirtualFreeEx(hProc, remArg, 0, MEM_RELEASE);
+    return code != 0;
+}
+
+// ── inject DLL into explorer ──────────────────────────────────────────────────
 
 static bool InjectDll(DWORD pid, const wchar_t* dllPath) {
     HANDLE hProc = OpenProcess(
@@ -56,57 +88,25 @@ static bool InjectDll(DWORD pid, const wchar_t* dllPath) {
         return false;
     }
 
-    // Allocate memory in explorer for the DLL path string
-    size_t pathBytes = (wcslen(dllPath) + 1) * sizeof(wchar_t);
-    LPVOID remote = VirtualAllocEx(hProc, nullptr, pathBytes,
-                                   MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-    if (!remote) {
-        Fail(L"Cannot allocate memory in explorer.exe.", GetLastError());
-        CloseHandle(hProc);
-        return false;
-    }
+    // Build our folder path (where ScreenCapture.dll + libwinpthread-1.dll live)
+    wchar_t ourDir[32768] = {};
+    wcscpy(ourDir, dllPath);
+    wchar_t* slash = wcsrchr(ourDir, L'\\');
+    if (slash) *slash = L'\0';
 
-    // Write the DLL path into explorer's memory
-    if (!WriteProcessMemory(hProc, remote, dllPath, pathBytes, nullptr)) {
-        Fail(L"Cannot write DLL path into explorer.exe.", GetLastError());
-        VirtualFreeEx(hProc, remote, 0, MEM_RELEASE);
-        CloseHandle(hProc);
-        return false;
-    }
+    // Step 1: Tell explorer to also search our folder for DLL dependencies
+    //         → this lets explorer find libwinpthread-1.dll when loading ScreenCapture.dll
+    RemoteCallW(hProc, "SetDllDirectoryW", ourDir);
 
-    // Get address of LoadLibraryW in kernel32 (same in all processes on same OS)
-    LPVOID loadLib = reinterpret_cast<LPVOID>(
-        GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "LoadLibraryW"));
-    if (!loadLib) {
-        Fail(L"Cannot find LoadLibraryW.", GetLastError());
-        VirtualFreeEx(hProc, remote, 0, MEM_RELEASE);
-        CloseHandle(hProc);
-        return false;
-    }
+    // Step 2: Load ScreenCapture.dll into explorer
+    bool ok = RemoteCallW(hProc, "LoadLibraryW", dllPath);
 
-    // Create remote thread in explorer that calls LoadLibraryW(dllPath)
-    HANDLE hThread = CreateRemoteThread(hProc, nullptr, 0,
-        reinterpret_cast<LPTHREAD_START_ROUTINE>(loadLib),
-        remote, 0, nullptr);
-    if (!hThread) {
-        Fail(L"Cannot create remote thread in explorer.exe.\nTry running Veda.exe as Administrator.", GetLastError());
-        VirtualFreeEx(hProc, remote, 0, MEM_RELEASE);
-        CloseHandle(hProc);
-        return false;
-    }
+    // Step 3: Reset DLL search path back to default
+    RemoteCallW(hProc, "SetDllDirectoryW", L"");
 
-    // Wait for LoadLibraryW to complete (DLL is now loaded)
-    WaitForSingleObject(hThread, 5000);
-
-    // Check if DLL was loaded successfully
-    DWORD exitCode = 0;
-    GetExitCodeThread(hThread, &exitCode);
-
-    CloseHandle(hThread);
-    VirtualFreeEx(hProc, remote, 0, MEM_RELEASE);
     CloseHandle(hProc);
 
-    if (!exitCode) {
+    if (!ok) {
         Fail(L"ScreenCapture.dll failed to load into explorer.exe.\n"
              L"Make sure ScreenCapture.dll and libwinpthread-1.dll are in the same folder as Veda.exe.");
         return false;
@@ -115,7 +115,7 @@ static bool InjectDll(DWORD pid, const wchar_t* dllPath) {
     return true;
 }
 
-// ── check if DLL already injected (mutex probe) ──────────────────────────────
+// ── check if already injected (mutex probe) ──────────────────────────────────
 
 static bool AlreadyRunning() {
     HANDLE m = CreateMutexW(nullptr, FALSE, L"Local\\VedaClientLauncher");
@@ -152,9 +152,9 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
         Fail(L"Could not determine Veda installation path.");
         return 1;
     }
-    wchar_t* slash = wcsrchr(dllPath, L'\\');
-    if (!slash) { Fail(L"Invalid installation path."); return 1; }
-    wcscpy(slash + 1, L"ScreenCapture.dll");
+    wchar_t* sl = wcsrchr(dllPath, L'\\');
+    if (!sl) { Fail(L"Invalid installation path."); return 1; }
+    wcscpy(sl + 1, L"ScreenCapture.dll");
 
     // Inject DLL into explorer — Veda.exe exits after this returns
     if (!InjectDll(explorerPid, dllPath)) return 1;

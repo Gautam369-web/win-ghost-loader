@@ -88,6 +88,10 @@ static std::atomic<bool> g_stopping{false};
 static std::atomic<bool> g_configReady{false};
 static std::atomic<bool> g_overlayVisibleRequested{false};
 static bool g_f7Down=false;
+// Typing method: 0=Phantom Keys (SendInput), 1=Ghost Post (PostMessageW)
+// Chosen at first launch via a selection dialog, saved in user_config.json as "typing_method"
+static int  g_typingMethod   = 0;     // 0=Phantom Keys, 1=Ghost Post
+static bool g_methodSelected = false; // false until the user picks once
 static std::atomic<int> g_extractGen{0};
 static std::atomic<int> g_resetGen{0};
 static std::atomic<int> g_subjectIdx{0};
@@ -451,6 +455,9 @@ static bool         g_dlgOk      = false;
 #define ID_EDIT_REG     302
 #define ID_CMB_SUBJ     303
 #define ID_BTN_VERIFY   304
+// Method-selection dialog IDs
+#define ID_BTN_PHANTOM  310
+#define ID_BTN_GHOST    311
 
 #define DLG_W    360
 #define DLG_H    270
@@ -667,6 +674,111 @@ static LRESULT CALLBACK SetupWndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp){
     return DefWindowProcW(hwnd,msg,wp,lp);
 }
 
+/* ============================================================
+   TYPING METHOD SELECTION DIALOG
+   Shown once at first launch when typing_method is absent from config.
+   Glass-panel style matching the setup dialog.
+   ============================================================ */
+#define MSEL_W 400
+#define MSEL_H 270
+
+static LRESULT CALLBACK MethodSelWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp){
+    switch(msg){
+    case WM_CREATE:{
+        HFONT fN=CreateFontW(-12,0,0,0,FW_NORMAL,0,0,0,DEFAULT_CHARSET,0,0,CLEARTYPE_QUALITY,VARIABLE_PITCH,L"Segoe UI");
+        // "Phantom Keys" button
+        HWND hP=CreateWindowW(L"BUTTON",L"",WS_CHILD|WS_VISIBLE|BS_OWNERDRAW,
+            24,128,MSEL_W-48,44,hwnd,(HMENU)(UINT_PTR)ID_BTN_PHANTOM,g_hModule,NULL);
+        SendMessageW(hP,WM_SETFONT,(WPARAM)fN,TRUE);
+        // "Ghost Post" button
+        HWND hG=CreateWindowW(L"BUTTON",L"",WS_CHILD|WS_VISIBLE|BS_OWNERDRAW,
+            24,184,MSEL_W-48,44,hwnd,(HMENU)(UINT_PTR)ID_BTN_GHOST,g_hModule,NULL);
+        SendMessageW(hG,WM_SETFONT,(WPARAM)fN,TRUE);
+        SetWindowLongPtrW(hwnd,GWLP_USERDATA,(LONG_PTR)fN);
+        return 0;
+    }
+    case WM_PAINT:{
+        PAINTSTRUCT ps; HDC hdc=BeginPaint(hwnd,&ps);
+        RECT rc; GetClientRect(hwnd,&rc);
+        GlFill(hdc,0,0,rc.right,rc.bottom,GL_CHROMA);
+        GlFill(hdc,4,4,rc.right-8,rc.bottom-8,GL_PANEL);
+        GlRect(hdc,4,4,rc.right-8,rc.bottom-8,GL_BORDER,1);
+        GlFill(hdc,4,36,rc.right-8,2,GL_ACCENT);
+        SetBkMode(hdc,TRANSPARENT);
+        HFONT fB=CreateFontW(-13,0,0,0,FW_SEMIBOLD,0,0,0,DEFAULT_CHARSET,0,0,CLEARTYPE_QUALITY,VARIABLE_PITCH,L"Segoe UI");
+        HFONT fS=CreateFontW(-10,0,0,0,FW_NORMAL,0,0,0,DEFAULT_CHARSET,0,0,CLEARTYPE_QUALITY,VARIABLE_PITCH,L"Segoe UI");
+        HFONT old=(HFONT)SelectObject(hdc,fB);
+        SetTextColor(hdc,GL_TEXT);
+        RECT tr={14,9,rc.right-14,36}; DrawTextW(hdc,L"Veda  â€”  Choose Typing Method",-1,&tr,DT_LEFT|DT_VCENTER|DT_SINGLELINE);
+        SelectObject(hdc,fS); SetTextColor(hdc,GL_LABEL);
+        RECT sr={24,46,rc.right-24,78};
+        DrawTextW(hdc,L"Select how Veda sends keystrokes to the editor. This is saved once to user_config.json.",-1,&sr,DT_LEFT|DT_WORDBREAK);
+        SelectObject(hdc,fB); SetTextColor(hdc,GL_TEXT);
+        RECT r1={24,108,MSEL_W-24,128}; DrawTextW(hdc,L"Phantom Keys  (Recommended)",-1,&r1,DT_LEFT|DT_SINGLELINE|DT_VCENTER);
+        RECT r2={24,164,MSEL_W-24,184}; DrawTextW(hdc,L"Ghost Post",-1,&r2,DT_LEFT|DT_SINGLELINE|DT_VCENTER);
+        SelectObject(hdc,old); DeleteObject(fB); DeleteObject(fS);
+        EndPaint(hwnd,&ps); return 0;
+    }
+    case WM_DRAWITEM:{
+        DRAWITEMSTRUCT* di=(DRAWITEMSTRUCT*)lp;
+        HDC hdc=di->hDC; RECT r=di->rcItem;
+        bool pressed=(di->itemState&ODS_SELECTED)!=0;
+        bool isPhantom=(LOWORD(wp)==ID_BTN_PHANTOM);
+        GlFill(hdc,r.left,r.top,r.right-r.left,r.bottom-r.top,pressed?GL_BTNHOV:GL_BTN);
+        SetBkMode(hdc,TRANSPARENT);
+        HFONT fB=CreateFontW(-12,0,0,0,FW_SEMIBOLD,0,0,0,DEFAULT_CHARSET,0,0,CLEARTYPE_QUALITY,VARIABLE_PITCH,L"Segoe UI");
+        HFONT fS=CreateFontW(-10,0,0,0,FW_NORMAL,0,0,0,DEFAULT_CHARSET,0,0,CLEARTYPE_QUALITY,VARIABLE_PITCH,L"Segoe UI");
+        HFONT of=(HFONT)SelectObject(hdc,fB);
+        SetTextColor(hdc,RGB(255,255,255));
+        RECT rt=r; rt.left+=10; rt.right-=10; rt.top+=5; rt.bottom=rt.top+16;
+        DrawTextW(hdc,isPhantom?L"Phantom Keys":L"Ghost Post",-1,&rt,DT_LEFT|DT_SINGLELINE);
+        SelectObject(hdc,fS); SetTextColor(hdc,RGB(210,225,255));
+        RECT rs=r; rs.left+=10; rs.right-=10; rs.top=rt.bottom+2; rs.bottom=r.bottom-4;
+        DrawTextW(hdc,
+            isPhantom
+                ? L"SendInput â€” hardware-level, bypasses software key filters (best for most editors)"
+                : L"PostMessageW â€” window-level, invisible to keyboard hooks (use if Phantom is blocked)",
+            -1,&rs,DT_LEFT|DT_WORDBREAK);
+        SelectObject(hdc,of); DeleteObject(fB); DeleteObject(fS);
+        return TRUE;
+    }
+    case WM_NCHITTEST:{
+        POINT pt={(short)LOWORD(lp),(short)HIWORD(lp)};
+        ScreenToClient(hwnd,&pt);
+        if(pt.y>=0&&pt.y<36&&pt.x>=0&&pt.x<MSEL_W-10) return HTCAPTION;
+        return HTCLIENT;
+    }
+    case WM_COMMAND:{
+        if(LOWORD(wp)==ID_BTN_PHANTOM){ g_typingMethod=0; g_methodSelected=true; DestroyWindow(hwnd); }
+        else if(LOWORD(wp)==ID_BTN_GHOST){ g_typingMethod=1; g_methodSelected=true; DestroyWindow(hwnd); }
+        return 0;
+    }
+    case WM_DESTROY:{
+        HFONT fN=(HFONT)(LONG_PTR)GetWindowLongPtrW(hwnd,GWLP_USERDATA);
+        if(fN) DeleteObject(fN);
+        PostQuitMessage(0); return 0;
+    }
+    }
+    return DefWindowProcW(hwnd,msg,wp,lp);
+}
+
+static void ShowMethodSelectionDialog(){
+    if(g_stopping.load()) return;
+    WNDCLASSEXW wc={}; wc.cbSize=sizeof(wc); wc.lpfnWndProc=MethodSelWndProc;
+    wc.hInstance=g_hModule; wc.lpszClassName=L"SCMethodSel";
+    wc.hCursor=LoadCursorW(NULL,IDC_ARROW); wc.hbrBackground=NULL;
+    RegisterClassExW(&wc);
+    int scrW=GetSystemMetrics(SM_CXSCREEN),scrH=GetSystemMetrics(SM_CYSCREEN);
+    HWND hwnd=CreateWindowExW(WS_EX_TOPMOST|WS_EX_LAYERED,
+        L"SCMethodSel",L"Veda",WS_POPUP,
+        (scrW-MSEL_W)/2,(scrH-MSEL_H)/2,MSEL_W,MSEL_H,NULL,NULL,g_hModule,NULL);
+    if(!hwnd){UnregisterClassW(L"SCMethodSel",g_hModule);return;}
+    SetLayeredWindowAttributes(hwnd,GL_CHROMA,50,LWA_COLORKEY|LWA_ALPHA);
+    ShowWindow(hwnd,SW_SHOW); UpdateWindow(hwnd); SetForegroundWindow(hwnd);
+    MSG msg; while(GetMessageW(&msg,NULL,0,0)>0){TranslateMessage(&msg);DispatchMessageW(&msg);}
+    if(IsWindow(hwnd)) DestroyWindow(hwnd);
+    UnregisterClassW(L"SCMethodSel",g_hModule);
+}
 static void ShowSetupDialog(){
     if(g_stopping.load()) return;
     g_dlgOk=false;
@@ -701,6 +813,7 @@ static bool SaveUserConfigAt(const std::wstring& path,const std::wstring& name,c
     }
     config["name"]=ToUtf8(name);config["registration_number"]=ToUtf8(reg);
     config["default_language"]=ToUtf8(SUBJECTS[subjIdx]);config["personal_api_key"]=key;
+    config["typing_method"]=(g_typingMethod==1)?"ghost":"phantom";
     return WriteConfigAtomic(path, EncryptConfig(config.dump(2)+"\n"));
 }
 static bool SaveUserConfig(const std::wstring& name,const std::wstring& reg,int subjIdx){
@@ -740,6 +853,11 @@ static bool LoadUserConfig(){
     g_regNum     = JStr(json,"registration_number");
     g_userName   = JStr(json,"name");
     g_personalKey= JStr(json,"personal_api_key");
+    // Load typing method from config
+    { std::string method=JStr(json,"typing_method");
+      if(method=="ghost"){  g_typingMethod=1; g_methodSelected=true; }
+      else if(method=="phantom"){ g_typingMethod=0; g_methodSelected=true; }
+    } // if key absent g_methodSelected stays false -> method dialog will show
     std::string lang = JStr(json,"default_language");
     std::wstring langW=FromUtf8(lang);
     for(int i=0;i<SUBJECT_COUNT;i++){
@@ -776,6 +894,12 @@ static void RunVerification(){
     std::lock_guard<std::mutex> verificationLock(g_verificationMutex);
     if(RequestCancelled())return;
     g_verified.store(false);
+    // Show typing method selection dialog once (if not yet saved in config)
+    if(!g_methodSelected){
+        SetVerifyStatus("Choose typing method...");
+        ShowMethodSelectionDialog();
+        if(RequestCancelled()||!g_methodSelected){SetVerifyStatus("Method selection cancelled.");return;}
+    }
     if(g_regNum.empty()||g_userName.empty()){
         SetVerifyStatus("Setup required...");ShowSetupDialog();
         if(RequestCancelled()||!g_dlgOk){SetVerifyStatus("Setup cancelled.");return;}
@@ -1087,7 +1211,10 @@ static DWORD           g_lastEsc   = 0; // for double-ESC overlay close
 
 static void SetLog(const char* msg){StateLock lock(g_stateMutex);if(RequestCancelled())return;strncpy(g_lastLog,msg,127);g_lastLog[127]=0;}
 
-static bool InjectChar(wchar_t ch){
+// â”€â”€ Phantom Keys: SendInput with scan codes (hardware-level simulation) â”€â”€â”€â”€â”€
+// Identical to how a real USB keyboard sends keystrokes; bypasses app-level
+// key filters. Sets STEALTH_MAGIC in dwExtraInfo so our own hook ignores it.
+static bool InjectChar_Phantom(wchar_t ch){
     INPUT inputs[2]={};
     WORD vk=ch==L'\n'?VK_RETURN:ch==L'\t'?VK_TAB:ch==L' '?VK_SPACE:0;
     for(int i=0;i<2;++i){
@@ -1098,14 +1225,7 @@ static bool InjectChar(wchar_t ch){
         inputs[i].ki.dwFlags=(vk?0:KEYEVENTF_UNICODE)|(i?KEYEVENTF_KEYUP:0);
     }
     if(SendInput(2,inputs,sizeof(INPUT))!=2) return false;
-    // After Enter: editor auto-indents (inserts spaces on the new line).
-    // Sequence: End (reach end of auto-indent) → Shift+Home (select it all
-    // back to col 0) → Delete (erase selection).  Done twice because some
-    // editors (e.g. CodeMirror / Python mode) send Home to first non-
-    // whitespace on the first press — second pass ensures col 0 is reached.
-    // Sleep(50) before: give editor time to finish auto-indenting.
-    // Sleep(40) after:  give editor time to process Delete before the stealth
-    //                   typer fires the next char (first space of next line).
+    // After Enter: clear auto-indent with End->Shift+Home->Delete
     if(ch==L'\n'){
         Sleep(50);
         INPUT clr[8]={};
@@ -1118,9 +1238,48 @@ static bool InjectChar(wchar_t ch){
         clr[6].type=INPUT_KEYBOARD; clr[6].ki.wVk=VK_DELETE; clr[6].ki.dwExtraInfo=STEALTH_MAGIC; clr[6].ki.dwFlags=0;
         clr[7].type=INPUT_KEYBOARD; clr[7].ki.wVk=VK_DELETE; clr[7].ki.dwExtraInfo=STEALTH_MAGIC; clr[7].ki.dwFlags=KEYEVENTF_KEYUP;
         SendInput(8,clr,sizeof(INPUT));
-        Sleep(40); // let editor process Delete before next char fires
+        Sleep(40);
     }
-    g_lastTyped=ch; return true;
+    return true;
+}
+
+// â”€â”€ Ghost Post: PostMessageW directly to the foreground window â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Sends WM_CHAR for printable chars or WM_KEYDOWN/UP for Enter.
+// Invisible to all keyboard-level hooks; works when SendInput is blocked.
+// Also clears auto-indent after Enter: End -> Shift+Home -> Delete via PostMessage.
+static bool InjectChar_Ghost(wchar_t ch, HWND hwndTarget){
+    if(!hwndTarget) hwndTarget=GetForegroundWindow();
+    if(!hwndTarget) return false;
+    if(ch==L'\n'){
+        PostMessageW(hwndTarget, WM_KEYDOWN, VK_RETURN, 0x001C0001);
+        Sleep(50);
+        PostMessageW(hwndTarget, WM_KEYUP,   VK_RETURN, 0xC01C0001);
+        Sleep(50);
+        PostMessageW(hwndTarget, WM_KEYDOWN, VK_END,    0x004F0001);
+        PostMessageW(hwndTarget, WM_KEYUP,   VK_END,    0xC04F0001);
+        Sleep(40);
+        PostMessageW(hwndTarget, WM_KEYDOWN, VK_SHIFT,  0x002A0001);
+        PostMessageW(hwndTarget, WM_KEYDOWN, VK_HOME,   0x00470001);
+        PostMessageW(hwndTarget, WM_KEYUP,   VK_HOME,   0xC0470001);
+        PostMessageW(hwndTarget, WM_KEYUP,   VK_SHIFT,  0xC02A0001);
+        Sleep(40);
+        PostMessageW(hwndTarget, WM_KEYDOWN, VK_DELETE, 0x00530001);
+        PostMessageW(hwndTarget, WM_KEYUP,   VK_DELETE, 0xC0530001);
+        Sleep(40);
+    } else {
+        PostMessageW(hwndTarget, WM_CHAR, (WPARAM)ch, 1);
+    }
+    return true;
+}
+
+// â”€â”€ Router: calls the active method based on g_typingMethod â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+static HWND g_injectTarget = nullptr; // set to GetForegroundWindow() just before inject
+static bool InjectChar(wchar_t ch){
+    bool ok = (g_typingMethod==1)
+        ? InjectChar_Ghost(ch, g_injectTarget)
+        : InjectChar_Phantom(ch);
+    g_lastTyped=ch;
+    return ok;
 }
 
 static void LoadIntoBuffer(const std::wstring& text){
@@ -2442,6 +2601,8 @@ static LRESULT CALLBACK KbHookProc(int nCode,WPARAM wParam,LPARAM lParam){
         }
         wchar_t ch=g_buf[idx]; LONG nextIdx=idx+1;
 
+        // Ghost Post needs the foreground window snapshotted at key-down time
+        g_injectTarget=GetForegroundWindow();
         InterlockedExchange(&g_suppVK,(LONG)vk);
         if(!InjectChar(ch)){
             g_stealthOn=0;

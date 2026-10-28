@@ -1,6 +1,21 @@
 #pragma once
+#include <algorithm>
 #include "JsonSupport.h"
 namespace sc {
+// Precision touchpads send fractions of a 120-unit mouse-wheel notch.
+// Preserve sub-pixel motion instead of rounding each event down to zero.
+struct WheelPixels {
+    long long remainder=0;
+    int consume(int delta){
+        const long long scaled=remainder+static_cast<long long>(delta)*20;
+        remainder=scaled%120;
+        return static_cast<int>(scaled/120);
+    }
+};
+inline int ScrollOffset(int offset,int step,int maximum){
+    const long long next=static_cast<long long>(offset)-step;
+    return static_cast<int>(std::max(0LL,std::min(next,static_cast<long long>(std::max(0,maximum)))));
+}
 inline std::string CleanResponse(const std::string& raw) {
     // Only remove a complete outer Markdown fence. Never dedent the content.
     size_t first=raw.find_first_not_of(" \t\r\n");

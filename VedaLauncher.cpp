@@ -7,6 +7,7 @@
 #include <windows.h>
 #include <tlhelp32.h>
 #include <wchar.h>
+#include "LauncherSupport.h"
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -26,21 +27,11 @@ static void Fail(const wchar_t* msg, DWORD err = 0) {
 // ── find explorer.exe PID ────────────────────────────────────────────────────
 
 static DWORD FindExplorerPid() {
-    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-    if (snap == INVALID_HANDLE_VALUE) return 0;
-
-    PROCESSENTRY32W pe = {};
-    pe.dwSize = sizeof(pe);
     DWORD pid = 0;
-    if (Process32FirstW(snap, &pe)) {
-        do {
-            if (_wcsicmp(pe.szExeFile, L"explorer.exe") == 0) {
-                pid = pe.th32ProcessID;
-                break;
-            }
-        } while (Process32NextW(snap, &pe));
-    }
-    CloseHandle(snap);
+    // Use this desktop's shell, not an arbitrary folder window or another
+    // signed-in user's Explorer process.
+    HWND shell=GetShellWindow();
+    if(shell)GetWindowThreadProcessId(shell,&pid);
     return pid;
 }
 
@@ -117,24 +108,24 @@ static bool InjectDll(DWORD pid, const wchar_t* dllPath) {
 
 // ── check if already injected (mutex probe) ──────────────────────────────────
 
-static bool AlreadyRunning() {
-    HANDLE m = CreateMutexW(nullptr, FALSE, L"Local\\VedaClientLauncher");
-    if (!m) return false;
-    bool running = (GetLastError() == ERROR_ALREADY_EXISTS);
-    CloseHandle(m);
-    return running;
+static void ShowAlreadyRunning() {
+    MessageBoxW(nullptr,L"Veda is already running or starting.\n"
+        L"Press F7 to show its overlay.\n"
+        L"To restart, press Alt+Q and wait for shutdown before opening Veda again.",
+        L"Veda",MB_OK|MB_ICONINFORMATION);
 }
 
 // ── entry point ──────────────────────────────────────────────────────────────
 
 int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     // Single-instance check
-    if (AlreadyRunning()) {
-        MessageBoxW(nullptr,
-            L"Veda is already running.\n"
-            L"Press F7 to show its overlay.\n"
-            L"Press Alt+Q to quit.",
-            L"Veda", MB_OK | MB_ICONINFORMATION);
+    veda::LaunchGuard startup;
+    if(!startup.valid()){
+        Fail(L"Could not check whether Veda is already starting.",startup.error());
+        return 1;
+    }
+    if (startup.existing()) {
+        ShowAlreadyRunning();
         return 0;
     }
 
@@ -142,6 +133,13 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     DWORD explorerPid = FindExplorerPid();
     if (!explorerPid) {
         Fail(L"Could not find explorer.exe. Is Windows Explorer running?");
+        return 1;
+    }
+    DWORD moduleError=0;
+    const auto state=veda::ModuleLoaded(explorerPid,L"ScreenCapture.dll",moduleError);
+    if(state==veda::ModuleState::loaded){ShowAlreadyRunning();return 0;}
+    if(state==veda::ModuleState::unknown){
+        Fail(L"Could not check Explorer for an existing Veda instance. Startup was stopped to avoid loading a duplicate.",moduleError);
         return 1;
     }
 

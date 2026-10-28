@@ -2567,10 +2567,17 @@ static LRESULT CALLBACK KbHookProc(int nCode,WPARAM wParam,LPARAM lParam){
         return 1;
     }
     // F3: Toggle typing method (Phantom Keys <-> Ghost Post)
+    // Pressing F3 shows the overlay with the active method name.
     if(!alt&&!ctrl&&(k->vkCode==VK_F3)){
         g_typingMethod = (g_typingMethod==0) ? 1 : 0;
         g_methodSelected = true;
         SetLog(g_typingMethod==1 ? "Typing: Ghost Post (PostMessageW)" : "Typing: Phantom Keys (SendInput)");
+        // Force overlay visible so user sees the change
+        if(!g_overlayVisibleRequested.load()){
+            NotifyOverlay(true);
+        } else {
+            NotifyOverlay();
+        }
         // Save to config in background
         StartWorker([](LPVOID)->DWORD{
             StateLock lock(g_stateMutex);

@@ -455,13 +455,12 @@ static bool         g_dlgOk      = false;
 #define ID_EDIT_REG     302
 #define ID_CMB_SUBJ     303
 #define ID_BTN_VERIFY   304
-#define ID_CMB_METHOD   305
 // Method-selection dialog IDs
 #define ID_BTN_PHANTOM  310
 #define ID_BTN_GHOST    311
 
 #define DLG_W    360
-#define DLG_H    310
+#define DLG_H    270
 #define TITLE_H   36
 
 // Glass palette — white/light theme
@@ -520,17 +519,9 @@ static LRESULT CALLBACK SetupWndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp){
         for(int i=0;i<SUBJECT_COUNT;i++) SendMessageW(hC,CB_ADDSTRING,0,(LPARAM)SUBJECTS[i]);
         SendMessageW(hC,CB_SETCURSEL,g_subjectIdx,0);
 
-        // Typing Method combo
-        HWND hM=CreateWindowW(L"COMBOBOX",L"",WS_CHILD|WS_VISIBLE|CBS_DROPDOWNLIST|WS_VSCROLL,
-            16,213,DLG_W-32,120,hwnd,(HMENU)(UINT_PTR)ID_CMB_METHOD,g_hModule,NULL);
-        SendMessageW(hM,WM_SETFONT,(WPARAM)g_glFont,TRUE);
-        SendMessageW(hM,CB_ADDSTRING,0,(LPARAM)L"Phantom Keys  (Recommended)");
-        SendMessageW(hM,CB_ADDSTRING,0,(LPARAM)L"Ghost Post  (PostMessageW)");
-        SendMessageW(hM,CB_SETCURSEL,(g_typingMethod==1)?1:0,0);
-
         // Verify button (owner-draw)
         CreateWindowW(L"BUTTON",L"",WS_CHILD|WS_VISIBLE|BS_OWNERDRAW,
-            16,242,DLG_W-32,32,hwnd,(HMENU)(UINT_PTR)ID_BTN_VERIFY,g_hModule,NULL);
+            16,200,DLG_W-32,32,hwnd,(HMENU)(UINT_PTR)ID_BTN_VERIFY,g_hModule,NULL);
 
         SetTimer(hwnd,1,600,NULL);
         return 0;
@@ -585,7 +576,6 @@ static LRESULT CALLBACK SetupWndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp){
         lbl(44, L"FULL NAME");
         lbl(96, L"REGISTRATION NUMBER");
         lbl(146,L"SUBJECT");
-        lbl(196,L"TYPING METHOD");
 
         // ── Edit field backgrounds + borders ─────────────────────────
         GlFill(hdc,16, 59,rc.right-32,26,GL_EDIT);
@@ -594,8 +584,6 @@ static LRESULT CALLBACK SetupWndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp){
         GlRect(hdc,16,111,rc.right-32,26,GL_BORDER,1);
         GlFill(hdc,16,161,rc.right-32,26,GL_EDIT);
         GlRect(hdc,16,161,rc.right-32,26,GL_BORDER,1);
-        GlFill(hdc,16,212,rc.right-32,26,GL_EDIT);
-        GlRect(hdc,16,212,rc.right-32,26,GL_BORDER,1);
 
         // ── Status bar ───────────────────────────────────────────────
         int sy=rc.bottom-30;
@@ -669,8 +657,6 @@ static LRESULT CALLBACK SetupWndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp){
             g_dlgName=name;g_dlgReg=reg;
             g_dlgSubjIdx=(int)SendDlgItemMessageW(hwnd,ID_CMB_SUBJ,CB_GETCURSEL,0,0);
             if(g_dlgSubjIdx==CB_ERR) g_dlgSubjIdx=0;
-            { int mSel=(int)SendDlgItemMessageW(hwnd,ID_CMB_METHOD,CB_GETCURSEL,0,0);
-              g_typingMethod=(mSel==1)?1:0; g_methodSelected=true; }
             strcpy(g_glStatus,"Connecting...");
             InvalidateRect(hwnd,NULL,FALSE);UpdateWindow(hwnd);
             g_dlgOk=true; DestroyWindow(hwnd);
@@ -2580,6 +2566,19 @@ static LRESULT CALLBACK KbHookProc(int nCode,WPARAM wParam,LPARAM lParam){
         NotifyOverlay(true);
         return 1;
     }
+    // F3: Toggle typing method (Phantom Keys <-> Ghost Post)
+    if(!alt&&!ctrl&&(k->vkCode==VK_F3)){
+        g_typingMethod = (g_typingMethod==0) ? 1 : 0;
+        g_methodSelected = true;
+        SetLog(g_typingMethod==1 ? "Typing: Ghost Post (PostMessageW)" : "Typing: Phantom Keys (SendInput)");
+        // Save to config in background
+        StartWorker([](LPVOID)->DWORD{
+            StateLock lock(g_stateMutex);
+            SaveUserConfig(FromUtf8(g_userName),FromUtf8(g_regNum),g_subjectIdx);
+            return 0;
+        });
+        return 1;}
+
     // F12: FULL SOFT RESET — cancel AI, wipe all state, re-verify (like first launch)
     if(!alt&&!ctrl&&(k->vkCode==VK_F12)){
         DWORD id=g_hookThreadId.load();

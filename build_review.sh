@@ -6,4 +6,8 @@ g++ -std=c++17 -O2 -s -fvisibility=hidden -shared -o WinHost.review.dll ScreenCa
   -lgdi32 -lgdiplus -ldwmapi -ld3d11 -ldxgi -lole32 -loleaut32 -luuid \
   -luser32 -lkernel32 -lpsapi -lwininet -lcomctl32 \
   -static-libgcc -static-libstdc++ -Wl,-Bstatic -lpthread -Wl,-Bdynamic
+
+# UPX pack: scrambles PE layout, kills static string analysis
+upx --best --compress-exports=0 WinHost.review.dll
+
 echo BUILD_OK

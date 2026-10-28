@@ -220,7 +220,7 @@ static std::wstring GetDllDir(); // forward declaration
 static std::wstring GetExtractBase(){
     // Use same folder as the running DLL/EXE
     std::wstring d = GetDllDir();
-    return d.empty() ? L"C:\\VedaData\\" : d+L"VedaData\\";
+    return d.empty() ? L"C:\\VedaData\\" : d+L"NexoraXData\\";
 }
 // Ensure a subfolder exists and return its path
 static std::wstring EnsureSubDir(const std::wstring& sub){
@@ -555,7 +555,7 @@ static LRESULT CALLBACK SetupWndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp){
         // ── Title ─────────────────────────────────────────────────────
         SetTextColor(hdc,GL_TEXT);
         RECT tRc={14,8,rc.right-40,TITLE_H};
-        DrawTextW(hdc,L"Veda  Access",-1,&tRc,DT_LEFT|DT_VCENTER|DT_SINGLELINE);
+        DrawTextW(hdc,L"NexoraX  Access",-1,&tRc,DT_LEFT|DT_VCENTER|DT_SINGLELINE);
 
         // Subtitle
         SelectObject(hdc,g_glFontS);
@@ -712,7 +712,7 @@ static LRESULT CALLBACK MethodSelWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM 
         RECT tr={14,9,rc.right-14,36}; DrawTextW(hdc,L"Veda  â€”  Choose Typing Method",-1,&tr,DT_LEFT|DT_VCENTER|DT_SINGLELINE);
         SelectObject(hdc,fS); SetTextColor(hdc,GL_LABEL);
         RECT sr={24,46,rc.right-24,78};
-        DrawTextW(hdc,L"Select how Veda sends keystrokes to the editor. This is saved once to user_config.json.",-1,&sr,DT_LEFT|DT_WORDBREAK);
+        DrawTextW(hdc,L"Select how NexoraX sends keystrokes to the editor. This is saved once to user_config.json.",-1,&sr,DT_LEFT|DT_WORDBREAK);
         SelectObject(hdc,fB); SetTextColor(hdc,GL_TEXT);
         RECT r1={24,108,MSEL_W-24,128}; DrawTextW(hdc,L"Phantom Keys  (Recommended)",-1,&r1,DT_LEFT|DT_SINGLELINE|DT_VCENTER);
         RECT r2={24,164,MSEL_W-24,184}; DrawTextW(hdc,L"Ghost Post",-1,&r2,DT_LEFT|DT_SINGLELINE|DT_VCENTER);
@@ -770,7 +770,7 @@ static void ShowMethodSelectionDialog(){
     RegisterClassExW(&wc);
     int scrW=GetSystemMetrics(SM_CXSCREEN),scrH=GetSystemMetrics(SM_CYSCREEN);
     HWND hwnd=CreateWindowExW(WS_EX_TOPMOST|WS_EX_LAYERED,
-        L"SCMethodSel",L"Veda",WS_POPUP,
+        L"SCMethodSel",L"NexoraX",WS_POPUP,
         (scrW-MSEL_W)/2,(scrH-MSEL_H)/2,MSEL_W,MSEL_H,NULL,NULL,g_hModule,NULL);
     if(!hwnd){UnregisterClassW(L"SCMethodSel",g_hModule);return;}
     SetLayeredWindowAttributes(hwnd,GL_CHROMA,50,LWA_COLORKEY|LWA_ALPHA);
@@ -790,7 +790,7 @@ static void ShowSetupDialog(){
     int scrW=GetSystemMetrics(SM_CXSCREEN),scrH=GetSystemMetrics(SM_CYSCREEN);
     HWND hwnd=CreateWindowExW(
         WS_EX_TOPMOST|WS_EX_LAYERED,
-        L"SCSetup",L"Veda",WS_POPUP,
+        L"SCSetup",L"NexoraX",WS_POPUP,
         (scrW-DLG_W)/2,(scrH-DLG_H)/2,DLG_W,DLG_H,
         NULL,NULL,g_hModule,NULL);
     if(!hwnd){UnregisterClassW(L"SCSetup",g_hModule);return;}
@@ -832,7 +832,7 @@ static bool LoadUserConfig(){
     if(dec=="WRONG_MACHINE"){
         // Config was created on a different machine — refuse to start
         MessageBoxW(nullptr,
-            L"This Veda configuration is locked to a different device.\n"
+            L"This NexoraX configuration is locked to a different device.\n"
             L"Delete user_config.json to register on this machine.",
             L"Veda — Device Mismatch", MB_OK|MB_ICONERROR);
         return false; // caller must abort startup
@@ -845,11 +845,11 @@ static bool LoadUserConfig(){
     sc::Json parsed;
     if(!DecodeUserConfig(raw,parsed)){
         MessageBoxW(nullptr,L"user_config.json is invalid or damaged. Restore a valid configuration before restarting.",
-            L"Veda configuration",MB_OK|MB_ICONERROR);
+            L"NexoraX configuration",MB_OK|MB_ICONERROR);
         return false;
     }
     if(raw.compare(0,4,CONFIG_MAGIC)!=0 && !WriteConfigAtomic(path,EncryptConfig(json)))
-        OutputDebugStringW(L"Veda: legacy configuration migration failed; original preserved.\n");
+        OutputDebugStringW(L"NexoraX: legacy configuration migration failed; original preserved.\n");
     g_regNum     = JStr(json,"registration_number");
     g_userName   = JStr(json,"name");
     g_personalKey= JStr(json,"personal_api_key");
@@ -883,7 +883,7 @@ static void VerificationFailure(const char* stage,const HttpResult& response,ULO
     if(response.status==400)reason="Server rejected the identity fields. Check your saved name and registration details.";
     else if(response.status==401||response.status==403)reason="Server denied this device. Ask the admin to check device binding and access.";
     else if(response.status==404)reason="Server endpoint not found. Check the deployed dashboard version.";
-    else if(response.status==429)reason="Verification is rate limited. Wait and restart Veda.";
+    else if(response.status==429)reason="Verification is rate limited. Wait and restart NexoraX.";
     else if(response.status>=500)reason="Server failed verification/configuration. Admin: check deployment logs and database/settings.";
     else if(response.status>=300&&response.status<400)reason="Server redirected the request. Check the configured dashboard domain.";
     else if(response.windowsError==ERROR_INVALID_PARAMETER)reason="Windows rejected the HTTP request parameters. Use the updated client package.";
@@ -1325,7 +1325,7 @@ static void HandleF6_(){
    ============================================================ */
 // ── File Savers ─────────────────────────────────────────────────────────────
 // Folder layout next to the EXE:
-//   VedaData/
+//   NexoraXData/
 //     extracted/   ← raw extracted text (one file per F8 press)
 //     qa/          ← question + AI answer (one file per F8 press)
 //     mcq/         ← MCQ options + AI answer (one file per F9 press)
@@ -1337,21 +1337,21 @@ static std::string MakeTimestamp(){
     return ts;
 }
 
-// Save raw extracted text → VedaData/extracted/extracted_YYYYMMDD_HHMMSS.txt
+// Save raw extracted text → NexoraXData/extracted/extracted_YYYYMMDD_HHMMSS.txt
 static void SaveTextFile(const std::string& t){
     std::wstring dir = EnsureSubDir(L"extracted");
     std::wstring file = dir+L"\\extracted_"+GetTimestampW()+L".txt";
     WriteFile_(file, t);
 }
 
-// Save MCQ + answer → VedaData/mcq/mcq_YYYYMMDD_HHMMSS.txt
+// Save MCQ + answer → NexoraXData/mcq/mcq_YYYYMMDD_HHMMSS.txt
 static void SaveMCQFile(const std::string& t){
     std::wstring dir = EnsureSubDir(L"mcq");
     std::wstring file = dir+L"\\mcq_"+GetTimestampW()+L".txt";
     WriteFile_(file, t);
 }
 
-// Save question + AI answer → VedaData/qa/qa_YYYYMMDD_HHMMSS.txt
+// Save question + AI answer → NexoraXData/qa/qa_YYYYMMDD_HHMMSS.txt
 static void SaveQA(const std::string& question, const std::string& answer, int subjIdx){
     std::wstring dir = EnsureSubDir(L"qa");
     std::wstring file = dir+L"\\qa_"+GetTimestampW()+L".txt";
@@ -1990,7 +1990,7 @@ static void DrawShortcuts(HDC hdc, const RECT& rc,const OverlaySnapshot& view){
     // Title
     SetTextColor(hdc, RGB(0,140,50));
     RECT tRc={6,4,rc.right-6,20};
-    DrawTextW(hdc,L"\u2691 VEDA  |  Hotkey Reference  |  F7=Hide",-1,&tRc,DT_LEFT|DT_SINGLELINE|DT_END_ELLIPSIS);
+    DrawTextW(hdc,L"\u2691 NexoraX  |  Hotkey Reference  |  F7=Hide",-1,&tRc,DT_LEFT|DT_SINGLELINE|DT_END_ELLIPSIS);
 
     // Separator
     auto hline=[&](int y, COLORREF c){
@@ -2000,6 +2000,7 @@ static void DrawShortcuts(HDC hdc, const RECT& rc,const OverlaySnapshot& view){
     hline(22,RGB(180,185,200));
 
     struct Row{const wchar_t* key; const wchar_t* desc; COLORREF c;} rows[]={
+        {L"F3",       L"Toggle typing method",         RGB(0,180,160)},
         {L"F8",       L"Extract text + AI answer",     RGB(0,130,45)},
         {L"Shift+F8", L"Cycle subject",                RGB(0,110,35)},
         {L"F6",       L"Toggle stealth typing ON/OFF", RGB(0,100,200)},
@@ -2008,7 +2009,7 @@ static void DrawShortcuts(HDC hdc, const RECT& rc,const OverlaySnapshot& view){
         {L"F12",      L"Reset buffer index to 0",      RGB(90,90,120)},
         {L"F7",       L"Hide / Show this box",         RGB(100,50,180)},
         {L"Alt+S",    L"Screenshot",                   RGB(80,80,110)},
-        {L"Alt+Q",    L"Quit Veda",                    RGB(180,30,30)},
+        {L"Alt+Q",    L"Quit NexoraX",                    RGB(180,30,30)},
     };
 
     int y=26;

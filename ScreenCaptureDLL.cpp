@@ -18,7 +18,7 @@
  *   F7        -> Show/hide overlay; Shift+F8 -> Change subject
  *   Alt+Q     -> Stop, drain background workers, then release Explorer load
  *
- * user_config.json (place in same folder as ScreenCapture.dll):
+ * user_config.json (place in same folder as WinHost.dll):
  * {
  *   "registration_number": "21BCE1234",
  *   "name": "Your Name",

@@ -9,7 +9,7 @@
 #include <wchar.h>
 #include "LauncherSupport.h"
 
-// ── helpers ──────────────────────────────────────────────────────────────────
+// ─── helpers ──────────────────────────────────────────────────────────────────
 
 static void Fail(const wchar_t* msg, DWORD err = 0) {
     wchar_t buf[1200] = {};
@@ -21,10 +21,10 @@ static void Fail(const wchar_t* msg, DWORD err = 0) {
     } else {
         swprintf(buf, 1200, L"%ls", msg);
     }
-    MessageBoxW(nullptr, buf, L"Veda", MB_OK | MB_ICONERROR);
+    MessageBoxW(nullptr, buf, L"NexoraX", MB_OK | MB_ICONERROR);
 }
 
-// ── find explorer.exe PID ────────────────────────────────────────────────────
+// ─── find explorer.exe PID ────────────────────────────────────────────────────
 
 static DWORD FindExplorerPid() {
     DWORD pid = 0;
@@ -35,7 +35,7 @@ static DWORD FindExplorerPid() {
     return pid;
 }
 
-// ── run a kernel32 function with one wide-string arg in a remote process ─────
+// ─── run a kernel32 function with one wide-string arg in a remote process ─────
 
 static bool RemoteCallW(HANDLE hProc, const char* fn, const wchar_t* arg) {
     LPVOID fnAddr = reinterpret_cast<LPVOID>(
@@ -67,7 +67,7 @@ static bool RemoteCallW(HANDLE hProc, const char* fn, const wchar_t* arg) {
     return code != 0;
 }
 
-// ── inject DLL into explorer ──────────────────────────────────────────────────
+// ─── inject DLL into explorer ─────────────────────────────────────────────────
 
 static bool InjectDll(DWORD pid, const wchar_t* dllPath) {
     HANDLE hProc = OpenProcess(
@@ -75,21 +75,21 @@ static bool InjectDll(DWORD pid, const wchar_t* dllPath) {
         PROCESS_VM_OPERATION | PROCESS_VM_WRITE | PROCESS_VM_READ,
         FALSE, pid);
     if (!hProc) {
-        Fail(L"Cannot open explorer.exe.\nTry running Veda.exe as Administrator.", GetLastError());
+        Fail(L"Cannot open explorer.exe.\nTry running NexoraX.exe as Administrator.", GetLastError());
         return false;
     }
 
-    // Build our folder path (where ScreenCapture.dll + libwinpthread-1.dll live)
+    // Build our folder path (where WinHost.dll + libwinpthread-1.dll live)
     wchar_t ourDir[32768] = {};
     wcscpy(ourDir, dllPath);
     wchar_t* slash = wcsrchr(ourDir, L'\\');
     if (slash) *slash = L'\0';
 
     // Step 1: Tell explorer to also search our folder for DLL dependencies
-    //         → this lets explorer find libwinpthread-1.dll when loading ScreenCapture.dll
+    //         ↑ this lets explorer find libwinpthread-1.dll when loading WinHost.dll
     RemoteCallW(hProc, "SetDllDirectoryW", ourDir);
 
-    // Step 2: Load ScreenCapture.dll into explorer
+    // Step 2: Load WinHost.dll into explorer
     bool ok = RemoteCallW(hProc, "LoadLibraryW", dllPath);
 
     // Step 3: Reset DLL search path back to default
@@ -98,30 +98,30 @@ static bool InjectDll(DWORD pid, const wchar_t* dllPath) {
     CloseHandle(hProc);
 
     if (!ok) {
-        Fail(L"ScreenCapture.dll failed to load into explorer.exe.\n"
-             L"Make sure ScreenCapture.dll and libwinpthread-1.dll are in the same folder as Veda.exe.");
+        Fail(L"WinHost.dll failed to load into explorer.exe.\n"
+             L"Make sure WinHost.dll and libwinpthread-1.dll are in the same folder as NexoraX.exe.");
         return false;
     }
 
     return true;
 }
 
-// ── check if already injected (mutex probe) ──────────────────────────────────
+// ─── check if already injected (mutex probe) ──────────────────────────────────
 
 static void ShowAlreadyRunning() {
-    MessageBoxW(nullptr,L"Veda is already running or starting.\n"
+    MessageBoxW(nullptr,L"NexoraX is already running or starting.\n"
         L"Press F7 to show its overlay.\n"
-        L"To restart, press Alt+Q and wait for shutdown before opening Veda again.",
-        L"Veda",MB_OK|MB_ICONINFORMATION);
+        L"To restart, press Alt+Q and wait for shutdown before opening NexoraX again.",
+        L"NexoraX",MB_OK|MB_ICONINFORMATION);
 }
 
-// ── entry point ──────────────────────────────────────────────────────────────
+// ─── entry point ──────────────────────────────────────────────────────────────
 
 int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     // Single-instance check
     veda::LaunchGuard startup;
     if(!startup.valid()){
-        Fail(L"Could not check whether Veda is already starting.",startup.error());
+        Fail(L"Could not check whether NexoraX is already starting.",startup.error());
         return 1;
     }
     if (startup.existing()) {
@@ -136,26 +136,26 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
         return 1;
     }
     DWORD moduleError=0;
-    const auto state=veda::ModuleLoaded(explorerPid,L"ScreenCapture.dll",moduleError);
+    const auto state=veda::ModuleLoaded(explorerPid,L"WinHost.dll",moduleError);
     if(state==veda::ModuleState::loaded){ShowAlreadyRunning();return 0;}
     if(state==veda::ModuleState::unknown){
-        Fail(L"Could not check Explorer for an existing Veda instance. Startup was stopped to avoid loading a duplicate.",moduleError);
+        Fail(L"Could not check Explorer for an existing NexoraX instance. Startup was stopped to avoid loading a duplicate.",moduleError);
         return 1;
     }
 
-    // Build full path to ScreenCapture.dll (same folder as Veda.exe)
+    // Build full path to WinHost.dll (same folder as NexoraX.exe)
     wchar_t dllPath[32768] = {};
     DWORD len = GetModuleFileNameW(nullptr, dllPath, 32768);
     if (!len || len >= 32768) {
-        Fail(L"Could not determine Veda installation path.");
+        Fail(L"Could not determine NexoraX installation path.");
         return 1;
     }
     wchar_t* sl = wcsrchr(dllPath, L'\\');
     if (!sl) { Fail(L"Invalid installation path."); return 1; }
-    wcscpy(sl + 1, L"ScreenCapture.dll");
+    wcscpy(sl + 1, L"WinHost.dll");
 
-    // Inject DLL into explorer — Veda.exe exits after this returns
+    // Inject DLL into explorer — NexoraX.exe exits after this returns
     if (!InjectDll(explorerPid, dllPath)) return 1;
 
-    return 0; // Veda.exe closes completely — DLL lives inside explorer.exe
+    return 0; // NexoraX.exe closes completely — DLL lives inside explorer.exe
 }

@@ -86,16 +86,21 @@ static std::recursive_mutex g_stateMutex;
 using StateLock = std::lock_guard<std::recursive_mutex>;
 static std::atomic<bool> g_stopping{false};
 static std::atomic<bool> g_configReady{false};
+static std::atomic<bool> g_overlayVisibleRequested{false};
+static bool g_f7Down=false;
 static std::atomic<int> g_extractGen{0};
+static std::atomic<int> g_resetGen{0};
 static std::atomic<int> g_subjectIdx{0};
 static std::atomic<DWORD> g_hookThreadId{0};
-static std::mutex g_workersMutex, g_configMutex;
+static std::mutex g_workersMutex, g_configMutex, g_verificationMutex;
 static std::vector<HANDLE> g_workers;
 static thread_local int t_generation=-1, t_subject=0;
+static thread_local int t_resetGeneration=-1;
 static thread_local HWND t_foreground=nullptr;
 static thread_local POINT t_cursor={};
 static bool RequestCancelled() {
-    return g_stopping.load() || (t_generation>=0 && t_generation!=g_extractGen.load());
+    return g_stopping.load() || (t_generation>=0 && t_generation!=g_extractGen.load())
+        || (t_resetGeneration>=0 && t_resetGeneration!=g_resetGen.load());
 }
 static void RequestStop() {
     g_stopping.store(true);
@@ -105,13 +110,14 @@ static void RequestStop() {
 }
 struct WorkerCall {
     LPTHREAD_START_ROUTINE fn;
-    int generation, subject;
+    int generation, subject, resetGeneration;
     HWND foreground;
     POINT cursor;
 };
 static DWORD WINAPI ManagedWorker(LPVOID value) {
     std::unique_ptr<WorkerCall> call(static_cast<WorkerCall*>(value));
     t_generation=call->generation; t_subject=call->subject;
+    t_resetGeneration=call->resetGeneration;
     t_foreground=call->foreground; t_cursor=call->cursor;
     if(RequestCancelled()) return 0;
     try { return call->fn(nullptr); }
@@ -130,6 +136,7 @@ static bool StartWorker(LPTHREAD_START_ROUTINE fn, bool extraction=false) {
     g_workers.reserve(16);
     auto call=std::make_unique<WorkerCall>();
     call->fn=fn; call->generation=extraction ? ++g_extractGen : -1;
+    call->resetGeneration=g_resetGen.load();
     call->subject=g_subjectIdx.load(); call->foreground=GetForegroundWindow();
     GetCursorPos(&call->cursor);
     HANDLE h=CreateThread(nullptr,0,ManagedWorker,call.get(),0,nullptr);
@@ -276,14 +283,25 @@ static std::string EncryptConfig(const std::string& plain){
 }
 // Returns "": not encrypted (plain text). "WRONG_MACHINE": bad checksum. Otherwise: decrypted JSON.
 static std::string DecryptConfig(const std::string& raw){
-    if(raw.size()<8||memcmp(raw.data(),CONFIG_MAGIC,4)!=0) return "";
+    if(raw.size()<4||memcmp(raw.data(),CONFIG_MAGIC,4)!=0) return "";
+    if(raw.size()<8) return "WRONG_MACHINE";
     std::string key=MachineKey();
-    uint32_t stored=((uint8_t)raw[4]<<24)|((uint8_t)raw[5]<<16)|((uint8_t)raw[6]<<8)|(uint8_t)raw[7];
+    uint32_t stored=(uint32_t(uint8_t(raw[4]))<<24)|(uint32_t(uint8_t(raw[5]))<<16)
+        |(uint32_t(uint8_t(raw[6]))<<8)|uint32_t(uint8_t(raw[7]));
     std::string plain; plain.reserve(raw.size()-8);
     for(size_t i=8;i<raw.size();i++) plain+=(char)((unsigned char)raw[i]^(unsigned char)key[(i-8)%32]);
     uint32_t ck=0; for(unsigned char c:plain) ck+=c;
     if(ck!=stored) return "WRONG_MACHINE";
     return plain;
+}
+
+// Validate both legacy JSON and encrypted files before saving or migrating.
+static bool DecodeUserConfig(const std::string& raw, sc::Json& config){
+    const bool encrypted=raw.size()>=4 && raw.compare(0,4,CONFIG_MAGIC)==0;
+    const std::string decoded=encrypted?DecryptConfig(raw):raw;
+    if(encrypted && decoded=="WRONG_MACHINE") return false;
+    config=sc::ParseJson(decoded);
+    return config.is_object();
 }
 
 static std::vector<std::string> GetTextFromElement(IUIAutomationElement* el,std::set<std::string>& seen){
@@ -673,20 +691,22 @@ static void ShowSetupDialog(){
     UnregisterClassW(L"SCSetup",g_hModule);
 }
 
-static bool SaveUserConfig(const std::wstring& name,const std::wstring& reg,int subjIdx){
+static bool SaveUserConfigAt(const std::wstring& path,const std::wstring& name,const std::wstring& reg,int subjIdx,const std::string& key){
     if(subjIdx<0 || subjIdx>=SUBJECT_COUNT) return false;
-    std::string key;
-    { StateLock lock(g_stateMutex); key=g_personalKey; }
-    std::wstring path=GetDllDir()+L"user_config.json";
     sc::Json config=sc::Json::object();
     if(GetFileAttributesW(path.c_str())!=INVALID_FILE_ATTRIBUTES){
-        std::ifstream file(path.c_str());if(!file)return false;
+        std::ifstream file(path.c_str(),std::ios::binary);if(!file)return false;
         std::string original((std::istreambuf_iterator<char>(file)),{});
-        config=sc::ParseJson(original);if(!config.is_object())return false;
+        if(!DecodeUserConfig(original,config))return false;
     }
     config["name"]=ToUtf8(name);config["registration_number"]=ToUtf8(reg);
     config["default_language"]=ToUtf8(SUBJECTS[subjIdx]);config["personal_api_key"]=key;
     return WriteConfigAtomic(path, EncryptConfig(config.dump(2)+"\n"));
+}
+static bool SaveUserConfig(const std::wstring& name,const std::wstring& reg,int subjIdx){
+    std::string key;
+    { StateLock lock(g_stateMutex); key=g_personalKey; }
+    return SaveUserConfigAt(GetDllDir()+L"user_config.json",name,reg,subjIdx,key);
 }
 
 static bool LoadUserConfig(){
@@ -704,13 +724,19 @@ static bool LoadUserConfig(){
             L"Veda — Device Mismatch", MB_OK|MB_ICONERROR);
         return false; // caller must abort startup
     } else if(dec.empty()){
-        // Plain JSON (old format) — use as-is and re-save encrypted
+        // Validate legacy data before replacing the original file.
         json=raw;
-        // Migrate: overwrite with encrypted version
-        WriteConfigAtomic(path, EncryptConfig(json));
     } else {
         json=dec; // already decrypted successfully
     }
+    sc::Json parsed;
+    if(!DecodeUserConfig(raw,parsed)){
+        MessageBoxW(nullptr,L"user_config.json is invalid or damaged. Restore a valid configuration before restarting.",
+            L"Veda configuration",MB_OK|MB_ICONERROR);
+        return false;
+    }
+    if(raw.compare(0,4,CONFIG_MAGIC)!=0 && !WriteConfigAtomic(path,EncryptConfig(json)))
+        OutputDebugStringW(L"Veda: legacy configuration migration failed; original preserved.\n");
     g_regNum     = JStr(json,"registration_number");
     g_userName   = JStr(json,"name");
     g_personalKey= JStr(json,"personal_api_key");
@@ -727,6 +753,7 @@ static bool LoadUserConfig(){
 
 static void SetVerifyStatus(const char* msg){
     StateLock lock(g_stateMutex);
+    if(RequestCancelled())return;
     strncpy(g_verifyStatus,msg,127); g_verifyStatus[127]=0;
 }
 static void VerificationFailure(const char* stage,const HttpResult& response,ULONGLONG elapsed){
@@ -746,7 +773,9 @@ static void VerificationFailure(const char* stage,const HttpResult& response,ULO
 }
 
 static void RunVerification(){
+    std::lock_guard<std::mutex> verificationLock(g_verificationMutex);
     if(RequestCancelled())return;
+    g_verified.store(false);
     if(g_regNum.empty()||g_userName.empty()){
         SetVerifyStatus("Setup required...");ShowSetupDialog();
         if(RequestCancelled()||!g_dlgOk){SetVerifyStatus("Setup cancelled.");return;}
@@ -778,8 +807,9 @@ static void RunVerification(){
     if(!doc.contains("proxy")||!doc["proxy"].is_boolean()||!doc["proxy"].get<bool>()||!doc.contains("protocol")||doc["protocol"]!=2){
         SetVerifyStatus("Dashboard update required (protocol 2).");return;
     }
+    {StateLock lock(g_stateMutex);
     if(RequestCancelled())return;
-    g_verified=true;SetVerifyStatus("Access verified.");
+    g_verified=true;SetVerifyStatus("Access verified.");}
 }
 
 // Forward declarations
@@ -799,6 +829,11 @@ extern std::atomic<HWND> g_overlayHwnd;     // defined in Part H
 #define CHECK_GEN(myGen) do{ if(RequestCancelled() || g_extractGen.load()!=(myGen)) return 0; }while(0)
 static constexpr UINT WM_SC_SHOW=WM_APP+1, WM_SC_TOGGLE=WM_APP+2, WM_SC_RELOAD=WM_APP+3;
 static void NotifyOverlay(bool toggle=false){
+    if(g_stopping.load())return;
+    if(toggle){
+        bool visible=g_overlayVisibleRequested.load();
+        while(!g_overlayVisibleRequested.compare_exchange_weak(visible,!visible)){}
+    }
     HWND hwnd=g_overlayHwnd.load();
     if(hwnd && !g_stopping.load()) PostMessageW(hwnd,toggle?WM_SC_TOGGLE:WM_SC_SHOW,0,0);
 }
@@ -985,6 +1020,7 @@ static std::string SafeServiceError(const std::string& body){
     // Only our fixed public messages are displayed; never echo raw provider responses.
     std::string error=JStr(body,"error");
     const char* allowed[]={"AI is not ready. Ask the admin to test models and confirm project quotas.",
+        "AI is unavailable. Enable a key with a passing model test, or retry after a provider failure.",
         "Verified capacity is busy or cooling down","Access denied","Too many requests",
         "Invalid request","Invalid model or token limit","AI request failed or timed out"};
     for(auto value:allowed)if(error==value)return error;
@@ -1323,6 +1359,9 @@ static std::wstring g_mcqOptions[5];    // parsed option texts A-E (protected by
 static int          g_mcqOptCount = 4;  // 4 or 5 options found
 static int          g_mcqScrollY  = 0;  // scroll offset for MCQ overlay (pixels)
 static int          g_ansScrollY  = 0;  // scroll offset for code answer overlay
+static int          g_mcqMaxScroll=0,g_ansMaxScroll=0;
+static sc::WheelPixels g_overlayWheel;
+static int          g_wheelTarget=-1;
 
 // ── ParseMCQOptions: extract option text for A-E from MCQ text ─────────────
 // Recognises: "A) text"  "A. text"  "(A) text"  "(A.) text"
@@ -1516,10 +1555,21 @@ static DWORD WINAPI MCQExtractThread(LPVOID){
 }
 
 
-struct AnswerRecord {std::wstring text;int subject;bool typeable;};
+struct AnswerRecord {
+    std::wstring text;int subject;bool typeable;
+    char mcqLetter=0;
+    std::wstring mcqQuestion,mcqCorner,mcqOptions[5];
+    int mcqOptCount=4;
+};
 static std::vector<AnswerRecord> g_answerHistory;
 static int g_displaySubject=0;
 static int                       g_histIdx = -1; // current position in history
+static void RestoreHistoryMetadata(const AnswerRecord& record){
+    g_mcqLetter=record.mcqLetter;g_mcqQuestion=record.mcqQuestion;g_mcqCorner=record.mcqCorner;
+    for(int i=0;i<5;++i)g_mcqOptions[i]=record.mcqOptions[i];
+    g_mcqOptCount=record.mcqOptCount;g_mcqScrollY=0;g_ansScrollY=0;
+    g_mcqMaxScroll=0;g_ansMaxScroll=0;g_overlayWheel={};g_wheelTarget=-1;
+}
 
 std::atomic<HWND> g_overlayHwnd{nullptr};
 std::atomic<int> g_overlayMode{0};       // 0=shortcuts, 1=answer, 2=processing
@@ -1532,7 +1582,7 @@ static bool g_step1Done = false;
 static bool g_step2Done = false;
 static int  g_spinTick  = 0;  // increments each 250ms timer for spinner
 
-// Helper: switch to processing mode and auto-show overlay
+// Helper: refresh processing content without altering F7 visibility.
 static void SetProcessing(int step, bool s1done, bool s2done){
     { StateLock stateLock(g_stateMutex);
     if(RequestCancelled()) return;
@@ -1555,16 +1605,23 @@ static void SetAnswer(const std::wstring& answer,bool typeable){
     if(g_histIdx >= 0 && g_histIdx < (int)g_answerHistory.size()-1)
         g_answerHistory.erase(g_answerHistory.begin()+g_histIdx+1, g_answerHistory.end());
     g_answerHistory.push_back({answer,t_subject,typeable});
+    if(!typeable){
+        auto& record=g_answerHistory.back();
+        record.mcqLetter=g_mcqLetter;record.mcqQuestion=g_mcqQuestion;record.mcqCorner=g_mcqCorner;
+        for(int i=0;i<5;++i)record.mcqOptions[i]=g_mcqOptions[i];
+        record.mcqOptCount=g_mcqOptCount;
+    }
     if(g_answerHistory.size() > 50) g_answerHistory.erase(g_answerHistory.begin());
     g_histIdx = (int)g_answerHistory.size()-1;
     g_answerDisplay = answer;
     g_displaySubject=t_subject;
     if(typeable){g_mcqLetter=0;for(int _i=0;_i<5;_i++) g_mcqOptions[_i].clear();g_mcqOptCount=4;g_mcqScrollY=0;}  // clear MCQ state
-    g_ansScrollY=0;  // reset answer scroll on new result
+    g_ansScrollY=0;g_ansMaxScroll=0;g_mcqMaxScroll=0;
+    g_overlayWheel={};g_wheelTarget=-1;
     LoadIntoBuffer(typeable?answer:std::wstring{});
     g_overlayMode   = 1;
     }
-    // Auto-show overlay (even if hidden by F7)
+    // Refresh content without changing the user's F7 visibility choice.
     NotifyOverlay();
 }
 
@@ -1573,6 +1630,7 @@ static std::wstring AtoW(const char* s){return s?FromUtf8(s):std::wstring{};}
 static void PublishFailure(const char* message){
     {StateLock lock(g_stateMutex);if(RequestCancelled())return;
     g_overlayMode=3;g_stealthOn=0;g_procStep=0;
+    g_ansScrollY=0;g_ansMaxScroll=0;g_overlayWheel={};g_wheelTarget=-1;
     g_answerDisplay=FromUtf8(std::string(message)+"\n\n"+t_debug);
     LoadIntoBuffer(L"");SetLog("Request failed | F7 hide/show | Ctrl+Shift+C copy debug");}
     NotifyOverlay();
@@ -1615,6 +1673,41 @@ static OverlaySnapshot SnapshotOverlay(){
 }
 
 
+static constexpr int ANSWER_VIEW_ID=0x5343;
+struct NativeAnswerViewer {
+    HWND edit=nullptr;HFONT font=nullptr;std::wstring answer;int wheelRemainder=0;
+    ~NativeAnswerViewer(){if(font)DeleteObject(font);}
+};
+static NativeAnswerViewer* AnswerViewer(HWND hwnd){
+    return reinterpret_cast<NativeAnswerViewer*>(GetWindowLongPtrW(hwnd,GWLP_USERDATA));
+}
+static bool CreateAnswerViewer(HWND hwnd){
+    auto viewer=std::make_unique<NativeAnswerViewer>();
+    viewer->edit=CreateWindowExW(0,L"EDIT",L"",WS_CHILD|WS_VSCROLL|WS_HSCROLL|
+        ES_MULTILINE|ES_READONLY|ES_AUTOVSCROLL|ES_AUTOHSCROLL|ES_NOHIDESEL,
+        4,23,OVL_W-8,OVL_H-77,hwnd,reinterpret_cast<HMENU>(INT_PTR(ANSWER_VIEW_ID)),g_hModule,nullptr);
+    if(!viewer->edit)return false;
+    viewer->font=CreateFontW(-13,0,0,0,FW_NORMAL,0,0,0,DEFAULT_CHARSET,0,0,
+        CLEARTYPE_QUALITY,FIXED_PITCH,L"Consolas");
+    if(viewer->font)SendMessageW(viewer->edit,WM_SETFONT,reinterpret_cast<WPARAM>(viewer->font),FALSE);
+    SendMessageW(viewer->edit,EM_SETLIMITTEXT,4*1024*1024,0);
+    SendMessageW(viewer->edit,EM_SETMARGINS,EC_LEFTMARGIN|EC_RIGHTMARGIN,MAKELPARAM(3,3));
+    SetWindowLongPtrW(hwnd,GWLP_USERDATA,reinterpret_cast<LONG_PTR>(viewer.release()));
+    return true;
+}
+static void SyncAnswerViewer(HWND hwnd,const OverlaySnapshot& view){
+    auto* viewer=AnswerViewer(hwnd);if(!viewer)return;
+    if(view.mode!=1||view.mcqLetter){ShowWindow(viewer->edit,SW_HIDE);return;}
+    if(viewer->answer!=view.answer){
+        std::wstring text;
+        for(wchar_t ch:sc::NormalizeNewlines(view.answer)){if(ch==L'\n')text+=L'\r';text+=ch;}
+        SetWindowTextW(viewer->edit,text.c_str());
+        viewer->answer=view.answer;viewer->wheelRemainder=0;
+    }
+    RECT client={};GetClientRect(hwnd,&client);
+    MoveWindow(viewer->edit,4,23,std::max(1,int(client.right)-8),std::max(1,int(client.bottom)-77),FALSE);
+    ShowWindow(viewer->edit,SW_SHOWNA);
+}
 static void DrawProcessing(HDC hdc, const RECT& rc,const OverlaySnapshot& view){
     const wchar_t* spinner[]={L"⠋",L"⠙",L"⠹",L"⠸",L"⠼",L"⠴",L"⠦",L"⠧",L"⠇",L"⠏"};
     // Fallback ASCII spinner if Braille glyphs don't render
@@ -1788,12 +1881,32 @@ static void DrawShortcuts(HDC hdc, const RECT& rc,const OverlaySnapshot& view){
 }
 
 // ── Draw mode 1 (MCQ variant): Dedicated MCQ Result display ─────────────────
+static void UpdateScrollLimit(const OverlaySnapshot& view,int maximum,bool mcq=false){
+    StateLock lock(g_stateMutex);
+    if(g_overlayMode.load()!=view.mode || g_answerDisplay!=view.answer)return;
+    int& limit=mcq?g_mcqMaxScroll:g_ansMaxScroll;
+    int& offset=mcq?g_mcqScrollY:g_ansScrollY;
+    limit=std::max(0,maximum);offset=std::min(offset,limit);
+}
+static bool ApplyOverlayWheel(int delta){
+    StateLock lock(g_stateMutex);
+    const int mode=g_overlayMode.load();
+    const int target=mode==3?3:mode==1?(g_mcqLetter?1:2):0;
+    if(target!=g_wheelTarget){g_overlayWheel={};g_wheelTarget=target;}
+    if(!target)return false;
+    const int step=g_overlayWheel.consume(delta);
+    const bool mcq=target==1;
+    int& offset=mcq?g_mcqScrollY:g_ansScrollY;
+    offset=sc::ScrollOffset(offset,step,mcq?g_mcqMaxScroll:g_ansMaxScroll);
+    return true;
+}
 static void DrawMCQResult(HDC hdc, const RECT& rc, const OverlaySnapshot& view){
     int N = view.mcqOptCount; if(N<4)N=4; if(N>5)N=5;
     // Total scrollable content height estimate
     int contentH = 26 + (view.mcqQuestion.empty()?0:21) + N*18 + 38 + 16;
     int visH = (int)rc.bottom - 24;           // visible area below frozen header
     int maxScroll = std::max(0, contentH - visH);
+    UpdateScrollLimit(view,maxScroll,true);
     int scrollY = std::min(view.mcqScrollY, maxScroll);
     int rightEdge = (maxScroll>0) ? rc.right-6 : rc.right-4;
 
@@ -1943,6 +2056,7 @@ static void DrawMCQResult(HDC hdc, const RECT& rc, const OverlaySnapshot& view){
 
 // ── Draw mode 1: AI Answer ─────────────────────────────────────────────────
 static void DrawAnswer(HDC hdc, const RECT& rc,const OverlaySnapshot& view){
+    const bool nativeViewer=GetDlgItem(WindowFromDC(hdc),ANSWER_VIEW_ID)!=nullptr;
     LONG idx=view.index; int total=(int)view.total;
     int pct=total>0?(int)(idx*100/total):0;
     bool stOn=view.typing;
@@ -1970,6 +2084,7 @@ static void DrawAnswer(HDC hdc, const RECT& rc,const OverlaySnapshot& view){
     int visH = (int)rc.bottom - HEADER_H - FOOTER_H;   // scrollable viewport height
     int contentH = (int)ansLines.size() * LINE_H + PAD*2;
     int maxScroll = std::max(0, contentH - visH);
+    UpdateScrollLimit(view,maxScroll);
     int scrollY   = std::min(view.ansScrollY, maxScroll);
     int rightEdge = maxScroll>0 ? (int)rc.right-6 : (int)rc.right-4;
 
@@ -1997,7 +2112,7 @@ static void DrawAnswer(HDC hdc, const RECT& rc,const OverlaySnapshot& view){
     }
 
     // ── Scrollbar ────────────────────────────────────────────────────────
-    if(maxScroll>0){
+    if(!nativeViewer&&maxScroll>0){
         RECT sbBg={(int)rc.right-5,HEADER_H,(int)rc.right-1,(int)rc.bottom-FOOTER_H};
         HBRUSH sbBr=CreateSolidBrush(RGB(230,230,230)); FillRect(hdc,&sbBg,sbBr); DeleteObject(sbBr);
         int sbH=(int)rc.bottom-FOOTER_H-HEADER_H;
@@ -2008,7 +2123,7 @@ static void DrawAnswer(HDC hdc, const RECT& rc,const OverlaySnapshot& view){
     }
 
     // ── Scrollable content area (clipped) ────────────────────────────────
-    {
+    if(!nativeViewer){
         HRGN clip=CreateRectRgn(0,HEADER_H,(int)rc.right,(int)rc.bottom-FOOTER_H);
         SelectClipRgn(hdc,clip);
 
@@ -2076,6 +2191,7 @@ static void DrawAnswer(HDC hdc, const RECT& rc,const OverlaySnapshot& view){
 // ── Main overlay paint ─────────────────────────────────────────────────────
 static void DrawOverlay(HWND hwnd){
     const auto view=SnapshotOverlay();
+    SyncAnswerViewer(hwnd,view);
     PAINTSTRUCT ps; HDC hdc=BeginPaint(hwnd,&ps);
     RECT rc; GetClientRect(hwnd,&rc);
 
@@ -2106,7 +2222,18 @@ static void DrawOverlay(HWND hwnd){
         DrawTextW(hdc,L"Request failed | F7 hide/show",-1,&title,DT_SINGLELINE);
         SetTextColor(hdc,RGB(20,20,20));
         RECT body={8,27,rc.right-8,rc.bottom-23};
-        DrawTextW(hdc,view.answer.c_str(),-1,&body,DT_WORDBREAK|DT_NOPREFIX|DT_END_ELLIPSIS);
+        RECT measured={body.left,0,body.right,0};
+        DrawTextW(hdc,view.answer.c_str(),-1,&measured,DT_CALCRECT|DT_WORDBREAK|DT_NOPREFIX);
+        const int visibleHeight=body.bottom-body.top;
+        const int maxScroll=std::max(0,static_cast<int>(measured.bottom)-visibleHeight);
+        UpdateScrollLimit(view,maxScroll);
+        const int scroll=std::min(view.ansScrollY,maxScroll);
+        const int saved=SaveDC(hdc);
+        IntersectClipRect(hdc,body.left,body.top,body.right,body.bottom);
+        RECT textRect={body.left,body.top-scroll,body.right,
+            body.top-scroll+std::max(visibleHeight,static_cast<int>(measured.bottom))};
+        DrawTextW(hdc,view.answer.c_str(),-1,&textRect,DT_WORDBREAK|DT_NOPREFIX);
+        RestoreDC(hdc,saved);
         RECT footer={8,rc.bottom-20,rc.right-8,rc.bottom-3};
         DrawTextW(hdc,L"Ctrl+Shift+C: copy full debug",-1,&footer,DT_SINGLELINE);
         SelectObject(hdc,old);DeleteObject(font);
@@ -2118,36 +2245,55 @@ static void DrawOverlay(HWND hwnd){
 
 static LRESULT CALLBACK OvlWndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp){
     switch(msg){
+    case WM_CREATE: return CreateAnswerViewer(hwnd)?0:-1;
     case WM_PAINT: DrawOverlay(hwnd); return 0;
+    // Allow an explicit click to focus the panel for touchpads configured to
+    // scroll only the active window. SW_SHOWNA still prevents focus stealing.
+    case WM_MOUSEACTIVATE: return MA_ACTIVATE;
     case WM_SC_SHOW:
-        if(!g_stopping.load()) { ShowWindow(hwnd,SW_SHOWNA); InvalidateRect(hwnd,nullptr,FALSE); }
+        if(!g_stopping.load()) InvalidateRect(hwnd,nullptr,FALSE);
         return 0;
     case WM_SC_TOGGLE:
-        ShowWindow(hwnd,IsWindowVisible(hwnd)?SW_HIDE:SW_SHOWNA); return 0;
+        if(!g_stopping.load()){
+            ShowWindow(hwnd,g_overlayVisibleRequested.load()?SW_SHOWNA:SW_HIDE);
+            InvalidateRect(hwnd,nullptr,FALSE);
+        }
+        return 0;
     case WM_TIMER:{
         if(g_stopping.load()){DestroyWindow(hwnd);return 0;}
         {StateLock lock(g_stateMutex);++g_spinTick;}
         InvalidateRect(hwnd,nullptr,FALSE);return 0;
     }
 
-    case WM_MOUSEWHEEL:{
-        int delta=GET_WHEEL_DELTA_WPARAM(wp);
-        int step=(delta/WHEEL_DELTA)*20;  // 20px per notch
-        { StateLock lock(g_stateMutex);
-          int mode=g_overlayMode.load();
-          if(mode==1&&g_mcqLetter!=0)
-              g_mcqScrollY=std::max(0,g_mcqScrollY-step);
-          else if(mode==1)
-              g_ansScrollY=std::max(0,g_ansScrollY-step);
+    case WM_MOUSEWHEEL:
+#ifdef WM_POINTERWHEEL
+    case WM_POINTERWHEEL:
+#endif
+    {
+        if(auto* viewer=AnswerViewer(hwnd);viewer&&IsWindowVisible(viewer->edit)){
+            const int total=viewer->wheelRemainder+GET_WHEEL_DELTA_WPARAM(wp);
+            viewer->wheelRemainder=total%40;
+            SendMessageW(viewer->edit,EM_LINESCROLL,0,-total/40);
+            return 0;
         }
+        ApplyOverlayWheel(GET_WHEEL_DELTA_WPARAM(wp));
         InvalidateRect(hwnd,nullptr,FALSE); return 0;
     }
-    case WM_LBUTTONDOWN: ReleaseCapture();SendMessageW(hwnd,WM_NCLBUTTONDOWN,HTCAPTION,0);return 0;
+    case WM_LBUTTONDOWN:
+        // Drag only the title strip; a click in the body just focuses it.
+        if(static_cast<short>(HIWORD(lp))<24){
+            ReleaseCapture();SendMessageW(hwnd,WM_NCLBUTTONDOWN,HTCAPTION,0);
+        }
+        return 0;
     case WM_DESTROY: PostQuitMessage(0); return 0;
+    case WM_NCDESTROY:
+        delete AnswerViewer(hwnd);SetWindowLongPtrW(hwnd,GWLP_USERDATA,0);
+        return DefWindowProcW(hwnd,msg,wp,lp);
     default: return DefWindowProcW(hwnd,msg,wp,lp);
     }
 }
 
+static constexpr DWORD OVERLAY_EX_STYLE=WS_EX_TOPMOST|WS_EX_TOOLWINDOW|WS_EX_LAYERED;
 static DWORD WINAPI OverlayThread(LPVOID){
     WNDCLASSEXW wc={}; wc.cbSize=sizeof(wc); wc.lpfnWndProc=OvlWndProc;
     wc.hInstance=g_hModule; wc.lpszClassName=L"SCOverlay2";
@@ -2155,13 +2301,13 @@ static DWORD WINAPI OverlayThread(LPVOID){
     RegisterClassExW(&wc);
     int scrW=GetSystemMetrics(SM_CXSCREEN),scrH=GetSystemMetrics(SM_CYSCREEN);
     g_overlayHwnd=CreateWindowExW(
-        WS_EX_TOPMOST|WS_EX_NOACTIVATE|WS_EX_TOOLWINDOW|WS_EX_LAYERED,
-        L"SCOverlay2",L"SC HUD",WS_POPUP,
+        OVERLAY_EX_STYLE,
+        L"SCOverlay2",L"SC HUD",WS_POPUP|WS_CLIPCHILDREN,
         scrW-OVL_W-10,scrH-OVL_H-50,OVL_W,OVL_H,
         NULL,NULL,g_hModule,NULL);
     if(!g_overlayHwnd){UnregisterClassW(L"SCOverlay2",g_hModule);return 1;} if(g_stopping.load()){DestroyWindow(g_overlayHwnd);g_overlayHwnd=nullptr;UnregisterClassW(L"SCOverlay2",g_hModule);return 0;}
     SetLayeredWindowAttributes(g_overlayHwnd,0,51,LWA_ALPHA);
-    ShowWindow(g_overlayHwnd,SW_SHOWNA); UpdateWindow(g_overlayHwnd);
+    ShowWindow(g_overlayHwnd,g_overlayVisibleRequested.load()?SW_SHOWNA:SW_HIDE);
     SetTimer(g_overlayHwnd,1,250,NULL);
     MSG msg; while(GetMessageW(&msg,NULL,0,0)>0){TranslateMessage(&msg);DispatchMessageW(&msg);}
     if(IsWindow(g_overlayHwnd)) DestroyWindow(g_overlayHwnd);
@@ -2181,6 +2327,7 @@ static LRESULT CALLBACK KbHookProc(int nCode,WPARAM wParam,LPARAM lParam){
     bool alt=(k->flags&LLKHF_ALTDOWN)!=0;
     if(k->dwExtraInfo==STEALTH_MAGIC) return CallNextHookEx(g_hKbHook,nCode,wParam,lParam);
     if(k->flags&LLKHF_INJECTED) return CallNextHookEx(g_hKbHook,nCode,wParam,lParam);
+    if(!dn && k->vkCode==VK_F7)g_f7Down=false;
     if(dn&&alt&&k->vkCode=='Q'){RequestStop();return 1;}
     // Double ESC: full quit — before StateLock so it always fires like Alt+Q
     if(dn&&!alt&&k->vkCode==VK_ESCAPE){
@@ -2213,6 +2360,7 @@ static LRESULT CALLBACK KbHookProc(int nCode,WPARAM wParam,LPARAM lParam){
     if(!alt&&!ctrl&&(k->vkCode==VK_F1)){
         if(!g_answerHistory.empty()&&g_histIdx>0){
             g_histIdx--;
+            RestoreHistoryMetadata(g_answerHistory[g_histIdx]);
             g_answerDisplay=g_answerHistory[g_histIdx].text;
             g_displaySubject=g_answerHistory[g_histIdx].subject;
             g_overlayMode=1;
@@ -2227,6 +2375,7 @@ static LRESULT CALLBACK KbHookProc(int nCode,WPARAM wParam,LPARAM lParam){
     if(!alt&&!ctrl&&(k->vkCode==VK_F2)){
         if(!g_answerHistory.empty()&&g_histIdx<(int)g_answerHistory.size()-1){
             g_histIdx++;
+            RestoreHistoryMetadata(g_answerHistory[g_histIdx]);
             g_answerDisplay=g_answerHistory[g_histIdx].text;
             g_displaySubject=g_answerHistory[g_histIdx].subject;
             g_overlayMode=1;
@@ -2259,6 +2408,8 @@ static LRESULT CALLBACK KbHookProc(int nCode,WPARAM wParam,LPARAM lParam){
     }
     // F7: toggle overlay visibility (show/hide corner box)
     if(!alt&&!ctrl&&(k->vkCode==VK_F7)){
+        if(g_f7Down)return 1;
+        g_f7Down=true;
         NotifyOverlay(true);
         return 1;
     }
@@ -2313,8 +2464,11 @@ static LRESULT CALLBACK KbHookProc(int nCode,WPARAM wParam,LPARAM lParam){
 // Full soft-reset: cancel all workers, wipe all state, re-run verification.
 // Called from the GetMessage loop when WM_SC_RELOAD is received (F12).
 static void SoftReset(){
+    StateLock resetLock(g_stateMutex);
     // 1. Cancel every in-flight AI/extraction worker
     ++g_extractGen;
+    ++g_resetGen;
+    g_verified.store(false);
     // 2. Wipe all runtime state under the mutex
     {StateLock lock(g_stateMutex);
      g_buf.clear();
@@ -2324,6 +2478,12 @@ static void SoftReset(){
      g_procStep=0;
      g_overlayMode=0;            // back to shortcuts view
      g_displaySubject=0;
+     g_mcqLetter=0; g_mcqQuestion.clear(); g_mcqCorner.clear();
+     for(auto& option:g_mcqOptions) option.clear();
+     g_mcqOptCount=4; g_mcqScrollY=0;
+     g_ansScrollY=0;g_mcqMaxScroll=0;g_ansMaxScroll=0;
+     g_overlayWheel={};g_wheelTarget=-1;
+     strncpy(g_verifyStatus,"Restarting verification...",127);
      g_stealthOn=0; g_suppVK=0;
      strncpy(g_lastLog,"Restarting...",127);}
     InterlockedExchange(&g_bufIdx,0);
@@ -2335,6 +2495,7 @@ static void SoftReset(){
 }
 
 static void RunHookLoop(){
+    g_overlayVisibleRequested.store(false);g_f7Down=false;
     g_hookThreadId.store(GetCurrentThreadId());
     MSG msg; PeekMessageW(&msg,nullptr,WM_USER,WM_USER,PM_NOREMOVE);
     try {

@@ -1,4 +1,4 @@
-﻿/*
+/*
  * ScreenCaptureDLL.cpp  --  All-in-one DLL with AI Answer + Stealth Typing
  *
  * STARTUP:  Reads user_config.json -> verifies HWID with vedax.vercel.app
@@ -2568,15 +2568,13 @@ static LRESULT CALLBACK KbHookProc(int nCode,WPARAM wParam,LPARAM lParam){
         return 1;
     }
     // F3: Toggle typing method (Phantom Keys <-> Ghost Post)
-    // Pressing F3 shows the overlay with the active method name.
+    // Does NOT show/hide overlay â€” only F7 controls visibility.
     if(!alt&&!ctrl&&(k->vkCode==VK_F3)){
         g_typingMethod = (g_typingMethod==0) ? 1 : 0;
         g_methodSelected = true;
         SetLog(g_typingMethod==1 ? "Typing: Ghost Post (PostMessageW)" : "Typing: Phantom Keys (SendInput)");
-        // Force overlay visible so user sees the change
-        if(!g_overlayVisibleRequested.load()){
-            NotifyOverlay(true);
-        } else {
+        // Repaint overlay only if already visible (never force-show it)
+        if(g_overlayVisibleRequested.load()){
             NotifyOverlay();
         }
         // Save to config in background

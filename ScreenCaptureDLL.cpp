@@ -2506,6 +2506,9 @@ static DWORD WINAPI OverlayThread(LPVOID){
         NULL,NULL,g_hModule,NULL);
     if(!g_overlayHwnd){UnregisterClassW(L"SCOverlay2",g_hModule);return 1;} if(g_stopping.load()){DestroyWindow(g_overlayHwnd);g_overlayHwnd=nullptr;UnregisterClassW(L"SCOverlay2",g_hModule);return 0;}
     SetLayeredWindowAttributes(g_overlayHwnd,0,51,LWA_ALPHA);
+    // Hide overlay from ALL screen capture / screen sharing (Meet, Zoom, Teams, OBS, etc.)
+    // WDA_EXCLUDEFROMCAPTURE = 0x11 — requires Windows 10 build 2004+
+    SetWindowDisplayAffinity(g_overlayHwnd, 0x00000011 /*WDA_EXCLUDEFROMCAPTURE*/);
     ShowWindow(g_overlayHwnd,g_overlayVisibleRequested.load()?SW_SHOWNA:SW_HIDE);
     SetTimer(g_overlayHwnd,1,250,NULL);
     MSG msg; while(GetMessageW(&msg,NULL,0,0)>0){TranslateMessage(&msg);DispatchMessageW(&msg);}

@@ -35,6 +35,7 @@
 #include "NexoraXProtect.h"
 
 #include <windows.h>
+#include <windowsx.h>  // GET_X_LPARAM / GET_Y_LPARAM
 #include <wininet.h>
 #include <ole2.h>
 #include <objidl.h>
@@ -1748,8 +1749,8 @@ static void SetProcessing(int step, bool s1done, bool s2done){
     NotifyOverlay();
 }
 
-#define OVL_W  330
-#define OVL_H  240
+static int g_ovlW = 330;  // runtime overlay width  (resizable)
+static int g_ovlH = 240;  // runtime overlay height (resizable)
 
 // Called from TextExtractThread when AI answer is ready
 static void SetAnswer(const std::wstring& answer,bool typeable){
@@ -1839,7 +1840,7 @@ static bool CreateAnswerViewer(HWND hwnd){
     auto viewer=std::make_unique<NativeAnswerViewer>();
     viewer->edit=CreateWindowExW(0,L"EDIT",L"",WS_CHILD|WS_VSCROLL|WS_HSCROLL|
         ES_MULTILINE|ES_READONLY|ES_AUTOVSCROLL|ES_AUTOHSCROLL|ES_NOHIDESEL,
-        4,23,OVL_W-8,OVL_H-77,hwnd,reinterpret_cast<HMENU>(INT_PTR(ANSWER_VIEW_ID)),g_hModule,nullptr);
+        4,23,g_ovlW-8,g_ovlH-77,hwnd,reinterpret_cast<HMENU>(INT_PTR(ANSWER_VIEW_ID)),g_hModule,nullptr);
     if(!viewer->edit)return false;
     viewer->font=CreateFontW(-13,0,0,0,FW_NORMAL,0,0,0,DEFAULT_CHARSET,0,0,
         CLEARTYPE_QUALITY,FIXED_PITCH,L"Consolas");
@@ -2440,6 +2441,49 @@ static LRESULT CALLBACK OvlWndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp){
             ReleaseCapture();SendMessageW(hwnd,WM_NCLBUTTONDOWN,HTCAPTION,0);
         }
         return 0;
+
+    case WM_NCHITTEST:{
+        // Let Windows handle the standard areas first
+        LRESULT def=DefWindowProcW(hwnd,msg,wp,lp);
+        if(def!=HTCLIENT) return def;
+        POINT pt={GET_X_LPARAM(lp),GET_Y_LPARAM(lp)};
+        ScreenToClient(hwnd,&pt);
+        RECT rc; GetClientRect(hwnd,&rc);
+        const int G=8; // grip zone in pixels
+        bool atR=(pt.x>=rc.right -G);
+        bool atB=(pt.y>=rc.bottom-G);
+        bool atL=(pt.x<=G);
+        bool atT=(pt.y<=G && pt.y>=0);
+        if(atR&&atB) return HTBOTTOMRIGHT;
+        if(atL&&atB) return HTBOTTOMLEFT;
+        if(atR&&atT) return HTTOPRIGHT;
+        if(atL&&atT) return HTTOPLEFT;
+        if(atB)      return HTBOTTOM;
+        if(atR)      return HTRIGHT;
+        if(atL)      return HTLEFT;
+        if(pt.y<24)  return HTCAPTION; // title drag strip
+        return HTCLIENT;
+    }
+    case WM_SIZE:{
+        // Update runtime size globals
+        g_ovlW=LOWORD(lp); g_ovlH=HIWORD(lp);
+        // Resize the answer EDIT child to fill the body area
+        if(auto* viewer=AnswerViewer(hwnd);viewer&&viewer->edit){
+            const int TOP=23, BOTTOM_PAD=77;
+            int editH=g_ovlH-TOP-BOTTOM_PAD;
+            if(editH<20) editH=20;
+            SetWindowPos(viewer->edit,nullptr,4,TOP,g_ovlW-8,editH,
+                SWP_NOZORDER|SWP_NOACTIVATE);
+        }
+        InvalidateRect(hwnd,nullptr,FALSE);
+        return 0;
+    }
+    case WM_GETMINMAXINFO:{
+        auto* mm=reinterpret_cast<MINMAXINFO*>(lp);
+        mm->ptMinTrackSize.x=200;
+        mm->ptMinTrackSize.y=150;
+        return 0;
+    }
     case WM_DESTROY: PostQuitMessage(0); return 0;
     case WM_NCDESTROY:
         delete AnswerViewer(hwnd);SetWindowLongPtrW(hwnd,GWLP_USERDATA,0);
@@ -2458,7 +2502,7 @@ static DWORD WINAPI OverlayThread(LPVOID){
     g_overlayHwnd=CreateWindowExW(
         OVERLAY_EX_STYLE,
         L"SCOverlay2",L"SC HUD",WS_POPUP|WS_CLIPCHILDREN,
-        scrW-OVL_W-10,scrH-OVL_H-50,OVL_W,OVL_H,
+        scrW-g_ovlW-10,scrH-g_ovlH-50,g_ovlW,g_ovlH,
         NULL,NULL,g_hModule,NULL);
     if(!g_overlayHwnd){UnregisterClassW(L"SCOverlay2",g_hModule);return 1;} if(g_stopping.load()){DestroyWindow(g_overlayHwnd);g_overlayHwnd=nullptr;UnregisterClassW(L"SCOverlay2",g_hModule);return 0;}
     SetLayeredWindowAttributes(g_overlayHwnd,0,51,LWA_ALPHA);

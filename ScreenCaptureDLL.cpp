@@ -184,7 +184,64 @@ static HBITMAP M0_BitBlt(){
     BOOL ok=BitBlt(hMem,0,0,w,h,hSrc,x,y,SRCCOPY|CAPTUREBLT); DeleteDC(hMem); ReleaseDC(NULL,hSrc);
     if(!ok){DeleteObject(hBmp);return NULL;} return hBmp;
 }
-static HBITMAP CaptureScreen(){ HBITMAP h=M0_BitBlt(); return h; }
+// DXGI Desktop Duplication -- captures admin-level windows that BitBlt misses.
+// Dynamically loads d3d11.dll so DLL still works on older systems without it.
+static HBITMAP M1_DXGICapture(){
+    HMODULE hD3D=LoadLibraryW(L"d3d11.dll");
+    if(!hD3D) return nullptr;
+    typedef HRESULT(WINAPI*PD3D11CD)(IDXGIAdapter*,D3D_DRIVER_TYPE,HMODULE,UINT,
+        const D3D_FEATURE_LEVEL*,UINT,UINT,ID3D11Device**,D3D_FEATURE_LEVEL*,ID3D11DeviceContext**);
+    auto pCreate=(PD3D11CD)GetProcAddress(hD3D,"D3D11CreateDevice");
+    if(!pCreate){FreeLibrary(hD3D);return nullptr;}
+    ID3D11Device* dev=nullptr; ID3D11DeviceContext* ctx=nullptr; D3D_FEATURE_LEVEL fl={};
+    if(FAILED(pCreate(nullptr,D3D_DRIVER_TYPE_HARDWARE,nullptr,0,nullptr,0,
+              D3D11_SDK_VERSION,&dev,&fl,&ctx))){FreeLibrary(hD3D);return nullptr;}
+    IDXGIDevice* dxgiDev=nullptr; dev->QueryInterface(__uuidof(IDXGIDevice),(void**)&dxgiDev);
+    IDXGIAdapter* ada=nullptr; if(dxgiDev)dxgiDev->GetAdapter(&ada);
+    IDXGIOutput* out=nullptr; if(ada)ada->EnumOutputs(0,&out);
+    IDXGIOutput1* out1=nullptr; if(out)out->QueryInterface(__uuidof(IDXGIOutput1),(void**)&out1);
+    IDXGIOutputDuplication* dup=nullptr; if(out1)out1->DuplicateOutput(dev,&dup);
+    HBITMAP result=nullptr;
+    if(dup){
+        for(int attempt=0;attempt<5&&!result;attempt++){
+            IDXGIResource* res=nullptr; DXGI_OUTDUPL_FRAME_INFO fi={};
+            HRESULT hr=dup->AcquireNextFrame(200,&fi,&res);
+            if(hr==DXGI_ERROR_WAIT_TIMEOUT){continue;}
+            if(FAILED(hr)) break;
+            if(fi.AccumulatedFrames==0&&attempt<4){dup->ReleaseFrame();if(res)res->Release();continue;}
+            ID3D11Texture2D* tex=nullptr;
+            if(res&&SUCCEEDED(res->QueryInterface(__uuidof(ID3D11Texture2D),(void**)&tex))){
+                D3D11_TEXTURE2D_DESC desc={}; tex->GetDesc(&desc);
+                desc.Usage=D3D11_USAGE_STAGING; desc.BindFlags=0;
+                desc.CPUAccessFlags=D3D11_CPU_ACCESS_READ; desc.MiscFlags=0;
+                ID3D11Texture2D* stg=nullptr;
+                if(SUCCEEDED(dev->CreateTexture2D(&desc,nullptr,&stg))){
+                    ctx->CopyResource(stg,tex);
+                    D3D11_MAPPED_SUBRESOURCE mp={};
+                    if(SUCCEEDED(ctx->Map(stg,0,D3D11_MAP_READ,0,&mp))){
+                        int W=(int)desc.Width,H=(int)desc.Height;
+                        HDC hdc=GetDC(NULL); HBITMAP bmp=CreateCompatibleBitmap(hdc,W,H); ReleaseDC(NULL,hdc);
+                        BITMAPINFO bi={}; bi.bmiHeader.biSize=sizeof(BITMAPINFOHEADER);
+                        bi.bmiHeader.biWidth=W; bi.bmiHeader.biHeight=-H;
+                        bi.bmiHeader.biPlanes=1; bi.bmiHeader.biBitCount=32; bi.bmiHeader.biCompression=BI_RGB;
+                        HDC hdcM=CreateCompatibleDC(NULL);
+                        SetDIBits(hdcM,bmp,0,H,(BYTE*)mp.pData,&bi,DIB_RGB_COLORS);
+                        DeleteDC(hdcM); ctx->Unmap(stg,0); result=bmp;
+                    }
+                    stg->Release();
+                }
+                tex->Release();
+            }
+            dup->ReleaseFrame(); if(res)res->Release();
+        }
+        dup->Release();
+    }
+    if(out1)out1->Release(); if(out)out->Release(); if(ada)ada->Release();
+    if(dxgiDev)dxgiDev->Release(); if(ctx)ctx->Release(); if(dev)dev->Release();
+    FreeLibrary(hD3D); return result;
+}
+// Primary: DXGI (captures admin windows). Fallback: BitBlt (normal sessions).
+static HBITMAP CaptureScreen(){ HBITMAP h=M1_DXGICapture(); if(!h)h=M0_BitBlt(); return h; }
 static DWORD WINAPI ScreenshotThread(LPVOID){
     Sleep(200); if(RequestCancelled()) return 0; HBITMAP hBmp=CaptureScreen(); if(!hBmp) return 1;
     SaveAsPng(hBmp,GetScreenshotPath()); DeleteObject(hBmp); return 0;
